@@ -1,1 +1,373 @@
 
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Select Laundry Machine</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: Arial, sans-serif;
+      background: #f4f5f7;
+      color: #222;
+    }
+
+    .container {
+      max-width: 480px;
+      margin: 30px auto;
+      padding: 24px;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 3px 14px rgba(0,0,0,.08);
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 24px;
+      margin-top: 0;
+    }
+
+    h2 {
+      font-size: 17px;
+      margin-top: 25px;
+    }
+
+    input {
+      width: 100%;
+      padding: 14px;
+      font-size: 18px;
+      border: 1px solid #ccc;
+      border-radius: 7px;
+      margin: 10px 0;
+    }
+
+    button {
+      width: 100%;
+      padding: 14px;
+      border: 0;
+      border-radius: 7px;
+      background: #1769aa;
+      color: white;
+      font-size: 16px;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+
+    button.secondary {
+      background: #555;
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+
+    #scanner {
+      display: none;
+      width: 100%;
+      margin-top: 15px;
+      border-radius: 8px;
+      background: #111;
+    }
+
+    #status {
+      margin-top: 18px;
+      padding: 12px;
+      background: #f0f2f4;
+      border-radius: 7px;
+      overflow-wrap: anywhere;
+      min-height: 45px;
+    }
+
+    .divider {
+      text-align: center;
+      margin: 20px 0;
+      color: #888;
+    }
+
+    .hint {
+      font-size: 13px;
+      color: #666;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="container">
+
+  <h1>Select Machine</h1>
+
+  <h2>Scan machine QR code</h2>
+
+  <p class="hint">
+    Point your camera at the QR code attached to the machine.
+  </p>
+
+  <button id="startScan">Scan QR Code</button>
+  <button id="stopScan" class="secondary" style="display:none">
+    Stop Camera
+  </button>
+
+  <video id="scanner" playsinline></video>
+
+  <div class="divider">OR</div>
+
+  <h2>Enter machine number</h2>
+
+  <input
+    id="machineNumber"
+    type="text"
+    placeholder="Enter machine number"
+    autocomplete="off"
+  >
+
+  <button id="submitMachine">Continue</button>
+
+  <div id="status">Waiting for machine selection.</div>
+
+</div>
+
+<script>
+"use strict";
+
+// ------------------------------------
+// BLE UUIDs from the Android Constants
+// ------------------------------------
+
+const BLE_CONFIG = {
+  standardService: "0000ffe0-0000-1000-8000-00805f9b34fb",
+  standardCharacteristic: "0000ffe1-0000-1000-8000-00805f9b34fb",
+
+  me51Service: "49535343-fe7d-4ae5-8fa9-9fafd205e455",
+  me51Write: "49535343-8841-43f4-a8d4-ecbe34729bb3",
+  me51Notify: "49535343-1e4d-4bd9-ba61-23c647249616"
+};
+
+const video = document.getElementById("scanner");
+const startButton = document.getElementById("startScan");
+const stopButton = document.getElementById("stopScan");
+const machineInput = document.getElementById("machineNumber");
+const statusBox = document.getElementById("status");
+
+let cameraStream = null;
+let scanTimer = null;
+let barcodeDetector = null;
+
+function setStatus(message) {
+  statusBox.textContent = message;
+}
+
+// ------------------------------------
+// MANUAL MACHINE NUMBER ENTRY
+// ------------------------------------
+
+document.getElementById("submitMachine")
+  .addEventListener("click", () => {
+
+    const machineNumber = machineInput.value.trim();
+
+    if (!machineNumber) {
+      setStatus("Please enter a machine number.");
+      return;
+    }
+
+    stopCamera();
+
+    handleMachineSelection({
+      source: "manual",
+      value: machineNumber
+    });
+  });
+
+machineInput.addEventListener("keydown", event => {
+  if (event.key === "Enter") {
+    document.getElementById("submitMachine").click();
+  }
+});
+
+// ------------------------------------
+// QR CODE SCANNER
+// ------------------------------------
+
+startButton.addEventListener("click", startCamera);
+stopButton.addEventListener("click", stopCamera);
+
+async function startCamera() {
+
+  if (!("BarcodeDetector" in window)) {
+    setStatus(
+      "QR scanning is not supported by this browser. " +
+      "A locally bundled QR decoder will be needed."
+    );
+    return;
+  }
+
+  try {
+    barcodeDetector = new BarcodeDetector({
+      formats: ["qr_code"]
+    });
+
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" }
+      },
+      audio: false
+    });
+
+    video.srcObject = cameraStream;
+    video.style.display = "block";
+
+    await video.play();
+
+    startButton.style.display = "none";
+    stopButton.style.display = "block";
+
+    setStatus("Camera active. Point it at a QR code.");
+
+    scanFrame();
+
+  } catch (error) {
+    setStatus("Unable to start camera: " + error.message);
+    stopCamera();
+  }
+}
+
+async function scanFrame() {
+
+  if (!cameraStream || video.readyState < 2) {
+    return;
+  }
+
+  try {
+    const results = await barcodeDetector.detect(video);
+
+    if (results.length > 0) {
+
+      const qrValue = results[0].rawValue;
+
+      stopCamera();
+
+      handleMachineSelection({
+        source: "qr",
+        value: qrValue
+      });
+
+      return;
+    }
+
+  } catch (error) {
+    setStatus("QR scanning error: " + error.message);
+  }
+
+  if (cameraStream) {
+    scanTimer = requestAnimationFrame(scanFrame);
+  }
+}
+
+function stopCamera() {
+
+  if (scanTimer) {
+    cancelAnimationFrame(scanTimer);
+    scanTimer = null;
+  }
+
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(track => track.stop());
+    cameraStream = null;
+  }
+
+  video.pause();
+  video.srcObject = null;
+  video.style.display = "none";
+
+  startButton.style.display = "block";
+  stopButton.style.display = "none";
+}
+
+// ------------------------------------
+// MACHINE SELECTION
+// ------------------------------------
+
+function handleMachineSelection(selection) {
+
+  console.log("Machine selection:", selection);
+
+  setStatus(
+    "Selected using " + selection.source +
+    ". Value: " + selection.value
+  );
+
+  /*
+    TODO 1:
+    Determine whether the QR value is a machine number,
+    a URL, or another encoded format.
+
+    TODO 2:
+    Parse the QR value and extract the machine identifier.
+
+    TODO 3:
+    Look up machine information and validate it.
+
+    TODO 4:
+    Connect to the machine using Web Bluetooth.
+  */
+
+  parseQrOrMachineNumber(selection);
+}
+
+// ------------------------------------
+// PLACEHOLDER: PARSE MACHINE INFORMATION
+// ------------------------------------
+
+function parseQrOrMachineNumber(selection) {
+
+  // Not implemented until the original QR format is known.
+
+  console.log("TODO: parse machine information", selection);
+
+}
+
+// ------------------------------------
+// PLACEHOLDER: MACHINE LOOKUP
+// ------------------------------------
+
+async function lookupMachine(machineNumber) {
+
+  // TODO: Implement after the original API/request code is provided.
+
+}
+
+// ------------------------------------
+// PLACEHOLDER: BLUETOOTH CONNECTION
+// ------------------------------------
+
+async function connectBluetooth() {
+
+  // TODO: Implement BLE scanning and GATT connection.
+
+}
+
+// ------------------------------------
+// PLACEHOLDER: SEND MACHINE COMMAND
+// ------------------------------------
+
+async function sendMachineCommand(data) {
+
+  // TODO: Implement encryption and BLE packet transmission.
+
+}
+
+</script>
+
+</body>
+</html>
