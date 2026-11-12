@@ -3,281 +3,235 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>BLE Device Inspector — Kiosoft-compatible metadata</title>
+<meta name="color-scheme" content="dark light">
+<title>Kiosoft BLE VI Diagnostic</title>
 <style>
-  :root { color-scheme: dark; --bg:#10151d; --panel:#192230; --line:#2c394b; --muted:#a8b4c5; --text:#edf3fa; --accent:#73b7ff; --good:#8bd5a8; --warn:#ffd27a; }
-  * { box-sizing:border-box; }
-  body { margin:0; padding:20px; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }
-  main { max-width:900px; margin:auto; }
-  h1 { font-size:1.45rem; margin:0 0 8px; }
-  h2 { font-size:1.05rem; margin:0 0 10px; }
-  p { color:var(--muted); }
-  .panel,.device { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin:14px 0; }
-  .actions { display:flex; flex-wrap:wrap; gap:10px; margin:14px 0; }
-  button { border:0; border-radius:10px; padding:12px 16px; background:var(--accent); color:#071321; font-weight:700; font-size:14px; }
-  button.secondary { background:#33445a; color:var(--text); }
-  button:disabled { opacity:.45; }
-  .status { padding:10px 12px; border-radius:9px; background:#202d3c; color:var(--muted); white-space:pre-wrap; }
-  .status.good { color:var(--good); }
-  .status.warn { color:var(--warn); }
-  .muted { color:var(--muted); }
-  .tag { display:inline-block; padding:2px 8px; border-radius:20px; background:#29394d; color:#cfe4ff; font-size:12px; margin:2px 4px 2px 0; }
-  .kv { display:grid; grid-template-columns:minmax(120px,190px) 1fr; gap:5px 12px; overflow-wrap:anywhere; }
-  .kv div:nth-child(odd) { color:var(--muted); }
-  details { border-top:1px solid var(--line); margin-top:12px; padding-top:10px; }
-  summary { cursor:pointer; font-weight:650; }
-  pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#0d131b; border:1px solid var(--line); padding:12px; border-radius:9px; font-size:12px; }
-  .device-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  .device-head h2 { overflow-wrap:anywhere; }
-  .small { font-size:12px; }
-  .danger { color:#ffb4a9; }
-  @media (max-width:520px) { body { padding:13px; } .kv { grid-template-columns:1fr; gap:1px; } .kv div:nth-child(even) { margin-bottom:8px; } }
+:root{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color-scheme:dark;background:#10151d;color:#edf2f7}
+*{box-sizing:border-box}body{margin:0;padding:20px;max-width:900px;margin-inline:auto}
+h1{font-size:1.35rem;margin:0 0 6px}p{color:#b8c3d1;line-height:1.45}
+.panel{background:#1a2330;border:1px solid #344255;border-radius:12px;padding:16px;margin:14px 0}
+.actions{display:flex;gap:10px;flex-wrap:wrap}
+button{border:0;border-radius:9px;padding:12px 15px;font:inherit;font-weight:650;background:#2868c7;color:white}
+button.secondary{background:#354457}button.danger{background:#8d3942}button:disabled{opacity:.45}
+.status{font-weight:650}.good{color:#7ddba5}.bad{color:#ff9a9a}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1017;border-radius:8px;padding:12px;min-height:48px;color:#d9e7fa}
+label{display:block;margin:10px 0 5px;color:#b8c3d1;font-size:.9rem}
+small{color:#aab6c5}.kv{display:grid;grid-template-columns:150px 1fr;gap:7px;font-size:.92rem}
+.kv div:nth-child(odd){color:#aab6c5}
+.notice{border-left:3px solid #d5a84b;padding-left:12px}
 </style>
 </head>
 <body>
-<main>
-  <h1>Bluetooth device inspector</h1>
-  <p>Inspect nearby BLE devices and collect the device/GATT metadata relevant to the Kiosoft Hercules app. This page does not send machine commands or change machine settings.</p>
+<h1>Kiosoft BLE — VI diagnostic</h1>
+<p>Connect to one machine, enable notifications, send only the initial <code>VI</code> identification request, and save the raw response. This page does not send GI, CS, SE, or machine-operation commands.</p>
 
-  <section class="panel">
-    <h2>Scan and inspect</h2>
-    <p class="small">Tap the button and choose a device in the Android Bluetooth chooser. The browser does not allow a web page to silently enumerate every nearby device; only devices you select can be inspected.</p>
-    <div class="actions">
-      <button id="addBtn">Choose nearby BLE device</button>
-      <button id="exportBtn" class="secondary" disabled>Export metadata JSON</button>
-      <button id="clearBtn" class="secondary" disabled>Clear list</button>
-    </div>
-    <div id="status" class="status">Checking browser support…</div>
-  </section>
+<section class="panel">
+  <div class="status" id="status">Not connected</div>
+  <p id="deviceLabel">No device selected.</p>
+  <div class="actions">
+    <button id="connect">Choose and connect to BLE device</button>
+    <button id="disconnect" class="secondary" disabled>Disconnect</button>
+  </div>
+  <div id="deviceInfo" class="kv" style="margin-top:15px"></div>
+</section>
 
-  <section class="panel">
-    <h2>Protocol identifiers used by the Android app</h2>
-    <div class="kv">
-      <div>Standard service</div><div><code>0000ffe0-0000-1000-8000-00805f9b34fb</code></div>
-      <div>Standard characteristic</div><div><code>0000ffe1-0000-1000-8000-00805f9b34fb</code></div>
-      <div>ME51 service</div><div><code>49535343-fe7d-4ae5-8fa9-9fafd205e455</code></div>
-      <div>ME51 notify characteristic</div><div><code>49535343-1e4d-4bd9-ba61-23c647249616</code></div>
-      <div>ME51 write characteristic</div><div><code>49535343-8841-43f4-a8d4-ecbe34729bb3</code></div>
-    </div>
-  </section>
+<section class="panel">
+  <h2 style="font-size:1.05rem;margin-top:0">VI request</h2>
+  <p>Vendor ID <code>33333</code>, followed by ASCII <code>TTI</code> and byte <code>01</code>.</p>
+  <label>Frame that will be sent</label>
+  <pre id="requestHex">02 00 0B 56 49 33 33 33 33 33 54 54 49 01 6F 03</pre>
+  <div class="actions">
+    <button id="send" disabled>Send VI once</button>
+    <button id="clear" class="secondary">Clear capture</button>
+  </div>
+  <p class="notice"><small>Only press Send VI once per connection unless you have a reason to repeat the diagnostic. The machine may respond with capability or status information.</small></p>
+</section>
 
-  <div id="devices"></div>
-</main>
+<section class="panel">
+  <h2 style="font-size:1.05rem;margin-top:0">Received notifications</h2>
+  <div id="rxStatus" class="status">Waiting for connection.</div>
+  <label>Notification packets (hex)</label>
+  <pre id="packets">No notifications received.</pre>
+  <label>Combined byte stream</label>
+  <pre id="stream">—</pre>
+  <label>Complete framed messages (if detected)</label>
+  <pre id="frames">—</pre>
+  <div class="actions">
+    <button id="export" class="secondary">Export diagnostic JSON</button>
+  </div>
+</section>
+<p><small>Browser requirements: Web Bluetooth in a supported browser, Bluetooth enabled, and a secure context (HTTPS or localhost). The Android chooser is controlled by the browser. Select the machine manually.</small></p>
+
 <script>
 (() => {
-  const UUID = {
-    standardService: '0000ffe0-0000-1000-8000-00805f9b34fb',
-    standardChar: '0000ffe1-0000-1000-8000-00805f9b34fb',
-    me51Service: '49535343-fe7d-4ae5-8fa9-9fafd205e455',
-    me51Notify: '49535343-1e4d-4bd9-ba61-23c647249616',
-    me51Write: '49535343-8841-43f4-a8d4-ecbe34729bb3'
-  };
-  const statusEl = document.getElementById('status');
-  const devicesEl = document.getElementById('devices');
-  const addBtn = document.getElementById('addBtn');
-  const exportBtn = document.getElementById('exportBtn');
-  const clearBtn = document.getElementById('clearBtn');
-  const records = [];
-  const byId = new Map();
+  const SERVICE = '0000ffe0-0000-1000-8000-00805f9b34fb';
+  const CHARACTERISTIC = '0000ffe1-0000-1000-8000-00805f9b34fb';
+  const $ = id => document.getElementById(id);
+  let device = null, server = null, characteristic = null;
+  let notifications = [], stream = [], completeFrames = [], sentAt = null;
+  let viSent = false;
 
-  const setStatus = (message, kind='') => {
-    statusEl.textContent = message;
-    statusEl.className = 'status ' + kind;
+  const bytesToHex = bytes => Array.from(bytes, b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
+  const setStatus = (text, good=false) => {
+    $('status').textContent = text;
+    $('status').className = 'status ' + (good ? 'good' : '');
   };
-  const hex = (buffer) => [...new Uint8Array(buffer)].map(x => x.toString(16).padStart(2,'0')).join(' ').toUpperCase();
-  const bytesToText = (buffer) => {
-    try { return new TextDecoder('utf-8', {fatal:false}).decode(buffer).replace(/[^\x20-\x7E]/g, '·'); }
-    catch { return ''; }
+  const render = () => {
+    $('packets').textContent = notifications.length
+      ? notifications.map((n,i)=>`${i+1}. ${n.at}\n${n.hex}`).join('\n\n')
+      : 'No notifications received.';
+    $('stream').textContent = stream.length ? bytesToHex(stream) : '—';
+    $('frames').textContent = completeFrames.length
+      ? completeFrames.map((f,i)=>`${i+1}. ${f.hex}`).join('\n')
+      : 'No complete frames detected yet.';
   };
-  const has = (props, name) => !!props[name];
-  const uuidName = (uuid) => {
-    const u = uuid.toLowerCase();
-    for (const [k,v] of Object.entries(UUID)) if (u === v) return k;
-    return '';
-  };
-  const addKV = (parent, key, value) => {
-    const k = document.createElement('div'); k.textContent = key;
-    const v = document.createElement('div'); v.textContent = value == null || value === '' ? '—' : String(value);
-    parent.append(k,v);
-  };
-  const makeSection = (title, parent) => {
-    const d = document.createElement('details');
-    const s = document.createElement('summary'); s.textContent = title;
-    d.append(s); parent.append(d); return d;
-  };
-  const renderRecord = (record) => {
-    const card = document.createElement('article'); card.className = 'device';
-    const head = document.createElement('div'); head.className = 'device-head';
-    const heading = document.createElement('div');
-    const h = document.createElement('h2'); h.textContent = record.name || '(unnamed BLE device)';
-    const sub = document.createElement('div'); sub.className='muted small'; sub.textContent = 'Browser device ID: ' + record.id;
-    heading.append(h,sub);
-    const badge = document.createElement('span'); badge.className='tag'; badge.textContent = record.profile;
-    head.append(heading,badge); card.append(head);
-
-    const kv = document.createElement('div'); kv.className='kv';
-    addKV(kv,'Name',record.name);
-    addKV(kv,'Device ID',record.id);
-    addKV(kv,'Connected',record.connected ? 'Yes' : 'No');
-    addKV(kv,'GATT services found',record.services.length);
-    addKV(kv,'Name length',record.name ? record.name.length : 0);
-    addKV(kv,'Name prefix (chars 0–1)',record.name ? record.name.slice(0,2) : '');
-    addKV(kv,'Name segment (chars 2–8)',record.name ? record.name.slice(2,9) : '');
-    addKV(kv,'Identifier (chars 9–14)',record.name ? record.name.slice(9,15) : '');
-    addKV(kv,'Suffix (chars 15–17)',record.name ? record.name.slice(15,18) : '');
-    card.append(kv);
-
-    const servicesDetails = makeSection('GATT services and characteristics',card);
-    for (const service of record.services) {
-      const block = document.createElement('div'); block.style.margin='10px 0';
-      const title = document.createElement('strong'); title.textContent = service.uuid + (uuidName(service.uuid) ? ' · ' + uuidName(service.uuid) : '');
-      block.append(title);
-      for (const ch of service.characteristics) {
-        const line = document.createElement('div'); line.style.margin='8px 0 8px 12px';
-        const props = Object.entries(ch.properties).filter(([,v])=>v).map(([k])=>k).join(', ') || 'none reported';
-        const name = document.createElement('div'); name.textContent = ch.uuid + (uuidName(ch.uuid) ? ' · ' + uuidName(ch.uuid) : '');
-        const p = document.createElement('div'); p.className='muted small'; p.textContent='Properties: ' + props;
-        line.append(name,p);
-        if (ch.valueHex) {
-          const val = document.createElement('div'); val.className='small'; val.textContent='Readable value (hex): ' + ch.valueHex;
-          line.append(val);
+  function parseFrames() {
+    // Kiosoft frame: 02 | 2-byte length | command/payload | LRC | 03.
+    // The app's receive check uses totalFrameLength - 5 === declaredLength.
+    let buf = stream.slice();
+    while (buf.length >= 5) {
+      const start = buf.indexOf(0x02);
+      if (start < 0) break;
+      if (start > 0) { buf = buf.slice(start); continue; }
+      const declared = (buf[1] << 8) | buf[2];
+      const total = declared + 5;
+      if (total < 5 || total > 8192) break;
+      if (buf.length < total) break;
+      const frame = buf.slice(0,total);
+      if (frame[total-1] === 0x03) {
+        const key = bytesToHex(frame);
+        if (!completeFrames.some(x => x.hex === key)) {
+          completeFrames.push({at:new Date().toISOString(),hex:key,bytes:frame});
         }
-        if (ch.valueText) {
-          const val = document.createElement('div'); val.className='small'; val.textContent='Readable value (text): ' + ch.valueText;
-          line.append(val);
-        }
-        block.append(line);
+        buf = buf.slice(total);
+      } else {
+        buf = buf.slice(1);
       }
-      servicesDetails.append(block);
-    }
-    const raw = makeSection('Raw metadata JSON',card);
-    const pre = document.createElement('pre'); pre.textContent=JSON.stringify(record,null,2); raw.append(pre);
-    devicesEl.prepend(card);
-  };
-
-  async function inspect(device) {
-    const id = device.id;
-    if (byId.has(id)) {
-      setStatus('That device is already in the list. Disconnect it or clear the list before adding it again.');
-      return;
-    }
-    const record = {
-      name: device.name || '',
-      id,
-      connected: false,
-      profile: 'Name does not match known pattern',
-      services: [],
-      inspectedAt: new Date().toISOString(),
-      notes: [
-        'Web Bluetooth device.id is browser-scoped and is not the Bluetooth MAC address.',
-        'The page cannot see advertisements/manufacturer data for every unselected device.'
-      ]
-    };
-    if (record.name.length === 18) record.profile = '18-character Kiosoft-style name';
-    if (record.name.slice(0,2) === 'Nn') record.profile += ' · Nn prefix';
-    byId.set(id, record);
-    records.push(record);
-    exportBtn.disabled = false; clearBtn.disabled = false;
-    setStatus('Connecting to ' + (record.name || id) + '…');
-
-    try {
-      const server = await device.gatt.connect();
-      record.connected = server.connected;
-      setStatus('Connected. Enumerating accessible GATT services…','good');
-      const services = await server.getPrimaryServices();
-      for (const service of services) {
-        const serviceData = {uuid: service.uuid, isPrimary: true, characteristics: []};
-        let chars = [];
-        try { chars = await service.getCharacteristics(); }
-        catch (e) { serviceData.characteristicError = e.message; }
-        for (const ch of chars) {
-          const item = {
-            uuid: ch.uuid,
-            properties: {
-              broadcast: has(ch.properties,'broadcast'),
-              read: has(ch.properties,'read'),
-              writeWithoutResponse: has(ch.properties,'writeWithoutResponse'),
-              write: has(ch.properties,'write'),
-              notify: has(ch.properties,'notify'),
-              indicate: has(ch.properties,'indicate'),
-              authenticatedSignedWrites: has(ch.properties,'authenticatedSignedWrites'),
-              reliableWrite: has(ch.properties,'reliableWrite'),
-              writableAuxiliaries: has(ch.properties,'writableAuxiliaries')
-            }
-          };
-          if (ch.properties.read) {
-            try {
-              const value = await ch.readValue();
-              item.valueHex = hex(value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength));
-              item.valueText = bytesToText(value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength));
-            } catch (e) { item.readError = e.message; }
-          }
-          try {
-            const descriptors = await ch.getDescriptors();
-            item.descriptors = descriptors.map(d => ({uuid:d.uuid}));
-          } catch (e) { item.descriptorsError = e.message; }
-          serviceData.characteristics.push(item);
-        }
-        record.services.push(serviceData);
-      }
-      record.connected = server.connected;
-      const standard = record.services.find(s=>s.uuid.toLowerCase()===UUID.standardService);
-      const me51 = record.services.find(s=>s.uuid.toLowerCase()===UUID.me51Service);
-      const hasStandard = !!standard && standard.characteristics.some(c=>c.uuid.toLowerCase()===UUID.standardChar);
-      const hasMe51 = !!me51 &&
-        me51.characteristics.some(c=>c.uuid.toLowerCase()===UUID.me51Notify) &&
-        me51.characteristics.some(c=>c.uuid.toLowerCase()===UUID.me51Write);
-      if (hasMe51) record.profile = 'ME51 service and notify/write characteristics found';
-      else if (hasStandard) record.profile = 'Standard FFE0/FFE1 service found';
-      else record.profile = 'Connected; known Kiosoft service not found';
-      renderRecord(record);
-      setStatus('Inspection complete. ' + record.services.length + ' service(s) found.','good');
-    } catch (error) {
-      record.error = error.name + ': ' + error.message;
-      record.connected = !!device.gatt?.connected;
-      renderRecord(record);
-      setStatus('Could not fully inspect device: ' + error.message,'warn');
     }
   }
-
-  addBtn.addEventListener('click', async () => {
+  function onNotification(event) {
+    const value = event.target.value;
+    const bytes = Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    notifications.push({at:new Date().toISOString(),hex:bytesToHex(bytes),bytes});
+    stream.push(...bytes);
+    parseFrames();
+    $('rxStatus').textContent = `Received ${notifications.length} notification packet(s), ${stream.length} byte(s) total.`;
+    render();
+  }
+  function onDisconnected() {
+    setStatus('Disconnected');
+    $('deviceLabel').textContent = device ? device.name || '(unnamed device)' : 'No device selected.';
+    $('connect').disabled = false;
+    $('disconnect').disabled = true;
+    $('send').disabled = true;
+    characteristic = null;
+    server = null;
+  }
+  async function connect() {
     if (!navigator.bluetooth) {
-      setStatus('Web Bluetooth is unavailable. Use a supported Chromium browser on Android and open this page in a secure context (HTTPS or localhost).','warn');
+      setStatus('Web Bluetooth is unavailable in this browser.');
       return;
     }
     try {
-      setStatus('Opening Android Bluetooth device chooser…');
-      const device = await navigator.bluetooth.requestDevice({
+      setStatus('Opening device chooser…');
+      device = await navigator.bluetooth.requestDevice({
         acceptAllDevices: true,
-        optionalServices: [UUID.standardService, UUID.me51Service],
-        optionalManufacturerData: []
+        optionalServices: [SERVICE]
       });
-      await inspect(device);
-    } catch (error) {
-      if (error.name === 'NotFoundError') setStatus('No device was selected, or no matching device was found.','warn');
-      else setStatus(error.name + ': ' + error.message,'warn');
+      device.addEventListener('gattserverdisconnected', onDisconnected);
+      $('deviceLabel').textContent = device.name || '(unnamed device)';
+      setStatus('Connecting…');
+      server = await device.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE);
+      characteristic = await service.getCharacteristic(CHARACTERISTIC);
+      await characteristic.startNotifications();
+      characteristic.addEventListener('characteristicvaluechanged', onNotification);
+      const p = characteristic.properties;
+      $('deviceInfo').innerHTML = `
+        <div>Device name</div><div></div>
+        <div>Device ID</div><div></div>
+        <div>Service UUID</div><div>${SERVICE}</div>
+        <div>Characteristic UUID</div><div>${CHARACTERISTIC}</div>
+        <div>Read / Write</div><div>${p.read} / ${p.write}</div>
+        <div>Write without response</div><div>${p.writeWithoutResponse}</div>
+        <div>Notify / Indicate</div><div>${p.notify} / ${p.indicate}</div>`;
+      $('deviceInfo').children[1].textContent = device.name || '(unnamed)';
+      $('deviceInfo').children[3].textContent = device.id || '(not exposed)';
+      setStatus('Connected; notifications enabled.', true);
+      $('rxStatus').textContent = 'Notifications enabled; waiting for VI response.';
+      $('connect').disabled = true;
+      $('disconnect').disabled = false;
+      $('send').disabled = !(p.write || p.writeWithoutResponse);
+    } catch (e) {
+      setStatus(`${e.name || 'Error'}: ${e.message || e}`);
+      $('connect').disabled = false;
+      $('send').disabled = true;
     }
-  });
-
-  exportBtn.addEventListener('click', () => {
-    const blob = new Blob([JSON.stringify({exportedAt:new Date().toISOString(), devices:records},null,2)],{type:'application/json'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href=url; a.download='bluetooth-device-metadata.json'; a.click();
-    setTimeout(()=>URL.revokeObjectURL(url),1000);
-  });
-  clearBtn.addEventListener('click', () => {
-    for (const device of navigator.bluetooth ? [] : []) { /* no-op */ }
-    records.length=0; byId.clear(); devicesEl.replaceChildren();
-    exportBtn.disabled=true; clearBtn.disabled=true;
-    setStatus('List cleared. Existing GATT connections may remain active until the browser closes them.');
-  });
-
-  if (!navigator.bluetooth) {
-    setStatus('Web Bluetooth is not available in this browser/context. Try Android Chrome over HTTPS or http://localhost.','warn');
-    addBtn.disabled=true;
-  } else {
-    setStatus('Ready. Select “Choose nearby BLE device” to open the system chooser.','good');
   }
+  async function sendVI() {
+    if (!characteristic || !device?.gatt?.connected) return;
+    if (viSent) {
+      if (!confirm('VI has already been sent on this connection. Send it again?')) return;
+    }
+    // Frame bytes: 02, length 000B, command "VI", payload 333333333354544901,
+    // XOR LRC 6F, terminator 03.
+    const frame = new Uint8Array([
+      0x02,0x00,0x0B,0x56,0x49,
+      0x33,0x33,0x33,0x33,0x33,0x54,0x54,0x49,0x01,
+      0x6F,0x03
+    ]);
+    try {
+      $('send').disabled = true;
+      setStatus('Sending VI…');
+      sentAt = new Date().toISOString();
+      if (characteristic.properties.write) {
+        await characteristic.writeValueWithResponse(frame);
+      } else {
+        await characteristic.writeValueWithoutResponse(frame);
+      }
+      viSent = true;
+      setStatus('VI sent. Waiting for machine response.', true);
+      $('rxStatus').textContent = 'VI sent; waiting for notifications.';
+    } catch (e) {
+      setStatus(`Write failed: ${e.name || 'Error'}: ${e.message || e}`);
+    } finally {
+      $('send').disabled = !characteristic || !(characteristic.properties.write || characteristic.properties.writeWithoutResponse);
+    }
+  }
+  function clearCapture() {
+    notifications = []; stream = []; completeFrames = []; sentAt = null; viSent = false;
+    $('rxStatus').textContent = characteristic ? 'Capture cleared; notifications remain enabled.' : 'Waiting for connection.';
+    render();
+  }
+  function exportJSON() {
+    const data = {
+      exportedAt:new Date().toISOString(),
+      purpose:'VI-only BLE diagnostic; no machine-operation commands sent',
+      device:device ? {name:device.name || null,id:device.id || null,connected:!!device.gatt?.connected} : null,
+      profile:{service: SERVICE, characteristic: CHARACTERISTIC},
+      request: {
+        command:'VI',
+        vendorId:'33333',
+        payloadHex:'33 33 33 33 33 54 54 49 01',
+        frameHex:'02 00 0B 56 49 33 33 33 33 33 54 54 49 01 6F 03',
+        sentAt
+      },
+      notifications,
+      combinedStreamHex:bytesToHex(stream),
+      completeFrames:completeFrames.map(f=>({at:f.at,hex:f.hex}))
+    };
+    const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href=url; a.download='kiosoft-vi-diagnostic.json'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+  $('connect').addEventListener('click',connect);
+  $('disconnect').addEventListener('click',()=>{if(device?.gatt?.connected)device.gatt.disconnect();});
+  $('send').addEventListener('click',sendVI);
+  $('clear').addEventListener('click',clearCapture);
+  $('export').addEventListener('click',exportJSON);
+  render();
 })();
 </script>
 </body>
