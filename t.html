@@ -36,6 +36,9 @@
     .properties span.yes::before { background: #238636; }
     .confirm { display: flex; gap: 9px; align-items: flex-start; margin: 14px 0; }
     .confirm input { width: auto; margin-top: 0.4rem; }
+    .capture-log { max-height: 24rem; overflow: auto; padding-left: 2.25rem; }
+    .capture-log li { padding: 8px 0; border-top: 1px solid var(--border); }
+    .capture-log code { display: block; white-space: pre-wrap; word-break: break-all; }
     code { overflow-wrap: anywhere; }
     @media (max-width: 560px) { body { padding: 16px; } }
   </style>
@@ -43,7 +46,7 @@
 <body>
   <main>
     <h1>Nn Bluetooth inspection</h1>
-    <p>This prototype discovers an Nn device, asks you to confirm its sticker number, connects, and lists accessible GATT services and characteristic properties. It does not read characteristic values, write data, enable notifications, authenticate, or control the machine.</p>
+    <p>This prototype discovers an Nn device, asks you to confirm its sticker number, connects, and lists accessible GATT services and characteristic properties. It can passively subscribe to FFE1 notifications and display the bytes pushed by the machine. It does not issue characteristic reads or writes, send application commands, authenticate, or control the machine.</p>
 
     <section class="card" aria-labelledby="support-title">
       <h2 id="support-title">Browser requirements</h2>
@@ -72,6 +75,17 @@
       <p id="connection-status" class="status" role="status">Not connected.</p>
       <button id="disconnect-button" type="button" disabled>Disconnect</button>
       <div id="gatt-results" aria-live="polite"></div>
+      <section id="notification-panel" class="service" aria-labelledby="notification-title" hidden>
+        <h3 id="notification-title">Passive FFE1 notification capture</h3>
+        <p id="capture-status" class="status" role="status">Connect and inspect GATT to locate FFE1.</p>
+        <div class="row">
+          <button id="start-capture-button" type="button" disabled>Start notification capture</button>
+          <button id="stop-capture-button" type="button" disabled>Stop notifications</button>
+          <button id="clear-capture-button" type="button">Clear log</button>
+        </div>
+        <p class="muted"><span id="capture-count">0</span> of 500 most recent notifications shown. Each browser notification event is kept as a separate entry.</p>
+        <ol id="capture-log" class="capture-log" aria-live="polite"></ol>
+      </section>
     </section>
 
     <p class="muted">GATT metadata describes what the device exposes. A listed write property is only reported; this page never uses it.</p>
@@ -97,13 +111,56 @@
     const disconnectButton = document.querySelector("#disconnect-button");
     const connectionStatus = document.querySelector("#connection-status");
     const gattResults = document.querySelector("#gatt-results");
+    const notificationPanel = document.querySelector("#notification-panel");
+    const captureStatus = document.querySelector("#capture-status");
+    const startCaptureButton = document.querySelector("#start-capture-button");
+    const stopCaptureButton = document.querySelector("#stop-capture-button");
+    const clearCaptureButton = document.querySelector("#clear-capture-button");
+    const captureCount = document.querySelector("#capture-count");
+    const captureLog = document.querySelector("#capture-log");
+    const FFE1_CHARACTERISTIC = "0000ffe1-0000-1000-8000-00805f9b34fb";
+    const MAX_CAPTURE_ENTRIES = 500;
 
     let selectedDevice = null;
     let selectedSuffixNumber = null;
+    let ffe1Characteristic = null;
+    let captureActive = false;
+    let captureStarting = false;
+    let captureStopping = false;
 
     function setMessage(element, message, isError = false) {
       element.textContent = message;
       element.classList.toggle("error", isError);
+    }
+
+    function updateCaptureControls() {
+      const connected = Boolean(selectedDevice?.gatt?.connected);
+      notificationPanel.hidden = !connected;
+      const canNotify = Boolean(ffe1Characteristic?.properties.notify);
+      startCaptureButton.disabled = !connected || !canNotify || captureActive || captureStarting || captureStopping;
+      stopCaptureButton.disabled = !connected || !captureActive || captureStopping;
+    }
+
+    function onFfe1Notification(event) {
+      // This DataView is the payload delivered by the notification event; no readValue() call is made.
+      const value = event.target.value;
+      const bytes = Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+      const hex = bytes.map((byte) => byte.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+      const entry = document.createElement("li");
+      const time = document.createElement("time");
+      const receivedAt = new Date();
+      time.dateTime = receivedAt.toISOString();
+      time.textContent = receivedAt.toLocaleString();
+      const summary = document.createElement("span");
+      summary.textContent = ` — ${bytes.length} bytes`;
+      const packet = document.createElement("code");
+      packet.textContent = hex || "(empty notification)";
+      entry.append(time, summary, packet);
+      captureLog.append(entry);
+      while (captureLog.children.length > MAX_CAPTURE_ENTRIES) {
+        captureLog.firstElementChild.remove();
+      }
+      captureCount.textContent = String(captureLog.children.length);
     }
 
     function browserErrorMessage(error) {
@@ -141,8 +198,15 @@
       connectButton.disabled = false;
       confirmCheckbox.disabled = false;
       confirmCheckbox.checked = false;
+      if (ffe1Characteristic) ffe1Characteristic.removeEventListener("characteristicvaluechanged", onFfe1Notification);
+      ffe1Characteristic = null;
+      captureActive = false;
+      captureStarting = false;
+      captureStopping = false;
       gattResults.replaceChildren();
       setMessage(connectionStatus, "Disconnected.");
+      setMessage(captureStatus, "Disconnected; the notification listener has been removed. Captured entries remain until cleared.");
+      updateCaptureControls();
       updateMatch();
     }
 
@@ -161,6 +225,8 @@
         if (selectedDevice) selectedDevice.removeEventListener("gattserverdisconnected", handleDisconnect);
         selectedDevice = device;
         selectedDevice.addEventListener("gattserverdisconnected", handleDisconnect);
+        ffe1Characteristic = null;
+        updateCaptureControls();
         const name = device.name || "(advertised name unavailable)";
         const suffix = name.match(/(\d{3})$/);
         selectedSuffixNumber = suffix ? Number(suffix[1]) : null;
@@ -200,6 +266,8 @@
         const server = await selectedDevice.gatt.connect();
         disconnectButton.disabled = false;
         setMessage(connectionStatus, "Connected. Inspecting accessible GATT metadata…");
+        notificationPanel.hidden = false;
+        setMessage(captureStatus, "Looking for FFE1 in accessible GATT services…");
         await inspectGatt(server);
         setMessage(connectionStatus, "Connected. GATT metadata inspection complete; no characteristic values were read.");
       } catch (error) {
@@ -210,6 +278,64 @@
       }
     });
 
+    startCaptureButton.addEventListener("click", async () => {
+      if (!selectedDevice?.gatt?.connected || !ffe1Characteristic) {
+        setMessage(captureStatus, "Connect and discover the FFE1 characteristic before starting capture.", true);
+        updateCaptureControls();
+        return;
+      }
+      if (!ffe1Characteristic.properties.notify) {
+        setMessage(captureStatus, "FFE1 is present but does not advertise the notify property.", true);
+        updateCaptureControls();
+        return;
+      }
+      const characteristic = ffe1Characteristic;
+      captureStarting = true;
+      updateCaptureControls();
+      characteristic.addEventListener("characteristicvaluechanged", onFfe1Notification);
+      try {
+        await characteristic.startNotifications();
+        if (!selectedDevice?.gatt?.connected || ffe1Characteristic !== characteristic) {
+          characteristic.removeEventListener("characteristicvaluechanged", onFfe1Notification);
+          setMessage(captureStatus, "The connection ended before notification capture could start.", true);
+          return;
+        }
+        captureActive = true;
+        setMessage(captureStatus, "Notification capture is active. No application-level command was sent.");
+      } catch (error) {
+        characteristic.removeEventListener("characteristicvaluechanged", onFfe1Notification);
+        setMessage(captureStatus, `Could not start notifications: ${browserErrorMessage(error)}`, true);
+      } finally {
+        captureStarting = false;
+        updateCaptureControls();
+      }
+    });
+
+    stopCaptureButton.addEventListener("click", async () => {
+      if (!captureActive || !ffe1Characteristic || !selectedDevice?.gatt?.connected) return;
+      const characteristic = ffe1Characteristic;
+      captureStopping = true;
+      updateCaptureControls();
+      try {
+        await characteristic.stopNotifications();
+        characteristic.removeEventListener("characteristicvaluechanged", onFfe1Notification);
+        captureActive = false;
+        setMessage(captureStatus, "Notification subscription stopped. Captured entries remain until cleared.");
+      } catch (error) {
+        if (selectedDevice?.gatt?.connected && ffe1Characteristic === characteristic) {
+          setMessage(captureStatus, `Could not stop notifications: ${browserErrorMessage(error)}`, true);
+        }
+      } finally {
+        captureStopping = false;
+        updateCaptureControls();
+      }
+    });
+
+    clearCaptureButton.addEventListener("click", () => {
+      captureLog.replaceChildren();
+      captureCount.textContent = "0";
+    });
+
     disconnectButton.addEventListener("click", () => {
       if (selectedDevice?.gatt?.connected) selectedDevice.gatt.disconnect();
       else handleDisconnect();
@@ -217,15 +343,20 @@
 
     async function inspectGatt(server) {
       gattResults.replaceChildren();
+      ffe1Characteristic = null;
       let services;
       try {
         services = await server.getPrimaryServices();
       } catch (error) {
         gattResults.append(makeNotice(`Could not enumerate primary services: ${browserErrorMessage(error)}`, true));
+        setMessage(captureStatus, `Could not inspect services: ${browserErrorMessage(error)}`, true);
+        updateCaptureControls();
         return;
       }
       if (services.length === 0) {
         gattResults.append(makeNotice("No accessible primary services were returned."));
+        setMessage(captureStatus, "No accessible services were returned; FFE1 was not found.");
+        updateCaptureControls();
         return;
       }
       for (const service of services) {
@@ -240,6 +371,9 @@
             serviceSection.append(makeNotice("No accessible characteristics were returned."));
           }
           for (const characteristic of characteristics) {
+            if (characteristic.uuid.toLowerCase() === FFE1_CHARACTERISTIC) {
+              ffe1Characteristic = characteristic;
+            }
             serviceSection.append(renderCharacteristic(characteristic));
           }
         } catch (error) {
@@ -247,6 +381,14 @@
         }
         gattResults.append(serviceSection);
       }
+      if (ffe1Characteristic) {
+        setMessage(captureStatus, ffe1Characteristic.properties.notify
+          ? "FFE1 is accessible and advertises notifications. Start capture with the button; subscription begins only after that click."
+          : "FFE1 is accessible, but it does not advertise notifications.", !ffe1Characteristic.properties.notify);
+      } else {
+        setMessage(captureStatus, "FFE1 was not found among accessible characteristics. Check that the device exposes it under an allowed service.", true);
+      }
+      updateCaptureControls();
     }
 
     function renderCharacteristic(characteristic) {
