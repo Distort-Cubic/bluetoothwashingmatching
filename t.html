@@ -50,7 +50,7 @@
 <body>
   <main>
     <h1>Nn Bluetooth inspection</h1>
-    <p>This prototype discovers an Nn device, asks you to confirm its sticker number, connects, and lists accessible GATT services and characteristic properties. It can passively subscribe to FFE1 notifications and inspect legacy frames. A separate, deliberate one-shot button can send the service-request VI identification request. The page does not read characteristics, authenticate, or control the machine.</p>
+    <p>This prototype discovers an Nn device, asks you to confirm its sticker number, connects, and lists accessible GATT services and characteristic properties. It can passively subscribe to FFE1 notifications and inspect legacy frames. It contains three separate, response-gated service-request identification actions (VI, GV, and GI), but currently keeps protocol writes disabled because the Android source does not reveal the effective GATT write type. The page does not read characteristics, authenticate, or control the machine.</p>
 
     <section class="card" aria-labelledby="support-title">
       <h2 id="support-title">Browser requirements</h2>
@@ -94,18 +94,21 @@
         <p class="muted">Notifications are kept intact above. This separate log assembles bytes into candidate frames and validates the legacy STX/length/XOR/ETX format; it does not authenticate, decrypt, or interpret machine state.</p>
         <p class="muted"><span id="frame-count">0</span> of 500 most recent frames and diagnostics shown.</p>
         <ol id="frame-log" class="frame-log" aria-live="polite"></ol>
-        <h3>One-shot VI identification test</h3>
-        <p class="muted">Sends only the MyServiceRequest2Fragment VI identification frame after an explicit click. It does not start a wash cycle or send a follow-up command. A failed attempt remains locked for this connection; disconnect and reconnect to re-arm.</p>
+        <h3>Manual Nn identification sequence</h3>
+        <p class="muted">Each MyServiceRequest2Fragment identification command requires its own explicit click. A later button unlocks only after the preceding response is frame-valid, has the matching command ID, and has success status 00. Responses must begin after that command's recorded request time in the current connection session. Android source does not explicitly set its characteristic write type, so this page currently blocks protocol writes until the Android write mode is verified. No command starts a wash cycle.</p>
         <div class="row">
           <button id="send-vi-button" type="button" disabled>Send VI identification request</button>
+          <button id="send-gv-button" type="button" disabled>Send GV machine information request</button>
+          <button id="send-gi-button" type="button" disabled>Send GI machine type request</button>
         </div>
-        <p id="vi-status" class="status" role="status">Connect, discover writable FFE1, and start notification capture before sending VI.</p>
-        <h4>Outbound VI log</h4>
+        <p id="vi-status" class="status" role="status">Android's explicit FFE1 write mode is unresolved; protocol writes are disabled pending source/runtime evidence.</p>
+        <p id="sequence-status" class="status" role="status">Sequence locked. Send VI manually; wait for a valid successful VI response before GV unlocks.</p>
+        <h4>Outbound identification request log</h4>
         <ol id="vi-log" class="capture-log" aria-live="polite"></ol>
       </section>
     </section>
 
-    <p class="muted">GATT metadata describes what the device exposes. A listed write property is used only by the explicit, one-shot VI identification test after notification capture is active.</p>
+    <p class="muted">GATT metadata describes what the device exposes. Advertised write properties are not used to guess Android's write mode; the VI, GV, and GI protocol actions remain locked until that mode is established.</p>
   </main>
 
   <script>
@@ -139,7 +142,10 @@
     const frameCount = document.querySelector("#frame-count");
     const frameLog = document.querySelector("#frame-log");
     const sendViButton = document.querySelector("#send-vi-button");
+    const sendGvButton = document.querySelector("#send-gv-button");
+    const sendGiButton = document.querySelector("#send-gi-button");
     const viStatus = document.querySelector("#vi-status");
+    const sequenceStatus = document.querySelector("#sequence-status");
     const viLog = document.querySelector("#vi-log");
     const FFE1_CHARACTERISTIC = "0000ffe1-0000-1000-8000-00805f9b34fb";
     const SERVICE_REQUEST_VENDOR_ID = "33333";
@@ -156,8 +162,19 @@
     let captureStarting = false;
     let captureStopping = false;
     let receiveBuffer = new Uint8Array(0);
-    let viAttempted = false;
-    let viSending = false;
+    let receiveByteMeta = [];
+    let identificationSequence = createIdentificationSequence();
+    let identificationSession = 0;
+    let requestSequenceNumber = 0;
+    let commandSending = false;
+
+    function createIdentificationSequence() {
+      return {
+        VI: { attempted: false, writeStatus: "not-sent", responseAccepted: false, pendingResponse: null, request: null },
+        GV: { attempted: false, writeStatus: "not-sent", responseAccepted: false, pendingResponse: null, request: null },
+        GI: { attempted: false, writeStatus: "not-sent", responseAccepted: false, pendingResponse: null, request: null }
+      };
+    }
 
     function setMessage(element, message, isError = false) {
       element.textContent = message;
@@ -169,9 +186,21 @@
       notificationPanel.hidden = !connected;
       const canNotify = Boolean(ffe1Characteristic?.properties.notify);
       startCaptureButton.disabled = !connected || !canNotify || captureActive || captureStarting || captureStopping;
-      stopCaptureButton.disabled = !connected || !captureActive || captureStopping || viSending;
+      stopCaptureButton.disabled = !connected || !captureActive || captureStopping || commandSending;
       const canWrite = Boolean(ffe1Characteristic?.properties.write || ffe1Characteristic?.properties.writeWithoutResponse);
-      sendViButton.disabled = !connected || ffe1Characteristic?.uuid?.toLowerCase() !== FFE1_CHARACTERISTIC || !canWrite || !captureActive || captureStarting || captureStopping || viAttempted || viSending;
+      const androidWriteMode = ffe1Characteristic ? getAndroidCompatibleWriteMode(ffe1Characteristic) : null;
+      const canSend = connected && ffe1Characteristic?.uuid?.toLowerCase() === FFE1_CHARACTERISTIC && canWrite && Boolean(androidWriteMode) && captureActive && !captureStarting && !captureStopping && !commandSending;
+      sendViButton.disabled = !canSend || identificationSequence.VI.attempted;
+      sendGvButton.disabled = !canSend || !identificationSequence.VI.responseAccepted || identificationSequence.GV.attempted;
+      sendGiButton.disabled = !canSend || !identificationSequence.GV.responseAccepted || identificationSequence.GI.attempted;
+    }
+
+    function resetIdentificationSequence(message = "Sequence reset. VI is first; later commands require matching successful responses.") {
+      identificationSession += 1;
+      identificationSequence = createIdentificationSequence();
+      commandSending = false;
+      setMessage(sequenceStatus, message);
+      updateCaptureControls();
     }
 
     function onFfe1Notification(event) {
@@ -185,7 +214,7 @@
       time.dateTime = receivedAt.toISOString();
       time.textContent = receivedAt.toLocaleString();
       const summary = document.createElement("span");
-      summary.textContent = ` — ${bytes.length} bytes`;
+      summary.textContent = ` â€” ${bytes.length} bytes`;
       const packet = document.createElement("code");
       packet.textContent = hex || "(empty notification)";
       entry.append(time, summary, packet);
@@ -196,17 +225,20 @@
       captureCount.textContent = String(captureLog.children.length);
 
       // Keep the raw event above intact; pass a copy of the same bytes to the assembler.
-      appendNotificationBytes(bytes);
+      appendNotificationBytes(bytes, {
+        receivedAtMs: receivedAt.getTime(),
+        receivedAtMonotonic: performance.now(),
+        sessionId: identificationSession
+      });
     }
 
     function formatHex(bytes) {
       return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0").toUpperCase()).join(" ");
     }
 
-    function appendFrameLogEntry(contentBuilder) {
+    function appendFrameLogEntry(contentBuilder, receivedAt = new Date()) {
       const entry = document.createElement("li");
       const time = document.createElement("time");
-      const receivedAt = new Date();
       time.dateTime = receivedAt.toISOString();
       time.textContent = receivedAt.toLocaleString();
       entry.append(time);
@@ -216,13 +248,14 @@
         frameLog.firstElementChild.remove();
       }
       frameCount.textContent = String(frameLog.children.length);
+      return entry;
     }
 
     function recordAssemblerDiagnostic(message, bytes = new Uint8Array(0)) {
       appendFrameLogEntry((entry) => {
         const summary = document.createElement("span");
         summary.className = "validation";
-        summary.textContent = ` — ASSEMBLER: ${message}`;
+        summary.textContent = ` â€” ASSEMBLER: ${message}`;
         entry.append(summary);
         if (bytes.length > 0) {
           const raw = document.createElement("code");
@@ -232,20 +265,28 @@
       });
     }
 
-    function appendNotificationBytes(incomingBytes) {
+    function appendNotificationBytes(incomingBytes, byteMeta = {}) {
       if (incomingBytes.length === 0) return;
       let combined = new Uint8Array(receiveBuffer.length + incomingBytes.length);
       combined.set(receiveBuffer, 0);
       combined.set(incomingBytes, receiveBuffer.length);
+      const incomingMeta = Array.from({ length: incomingBytes.length }, () => ({
+        receivedAtMs: byteMeta.receivedAtMs ?? Date.now(),
+        receivedAtMonotonic: byteMeta.receivedAtMonotonic ?? performance.now(),
+        sessionId: byteMeta.sessionId ?? identificationSession
+      }));
+      let combinedMeta = receiveByteMeta.concat(incomingMeta);
 
       if (combined.length > MAX_RECEIVE_BUFFER_BYTES) {
         const discardedCount = combined.length - MAX_RECEIVE_BUFFER_BYTES;
         const discarded = combined.slice(0, discardedCount);
         combined = combined.slice(discardedCount);
+        combinedMeta = combinedMeta.slice(discardedCount);
         recordAssemblerDiagnostic(`receive buffer limit (${MAX_RECEIVE_BUFFER_BYTES} bytes) exceeded; discarded ${discardedCount} oldest byte(s) before parsing`, discarded);
       }
 
       receiveBuffer = combined;
+      receiveByteMeta = combinedMeta;
       extractCompleteFrames();
     }
 
@@ -260,6 +301,7 @@
       if (count <= 0) return;
       const dropped = receiveBuffer.slice(0, count);
       receiveBuffer = receiveBuffer.slice(count);
+      receiveByteMeta = receiveByteMeta.slice(count);
       recordAssemblerDiagnostic(`${reason}; discarded ${count} byte(s) while resynchronizing`, dropped);
     }
 
@@ -283,7 +325,7 @@
 
         const bodyLength = (receiveBuffer[1] << 8) | receiveBuffer[2];
         if (bodyLength < 2 || bodyLength > MAX_FRAME_BODY_LENGTH) {
-          recordAssemblerDiagnostic(`invalid declared body length ${bodyLength}; accepted range is 2–${MAX_FRAME_BODY_LENGTH}`, receiveBuffer.slice(0, 3));
+          recordAssemblerDiagnostic(`invalid declared body length ${bodyLength}; accepted range is 2â€“${MAX_FRAME_BODY_LENGTH}`, receiveBuffer.slice(0, 3));
           discardReceivePrefix(1, "invalid frame length");
           continue;
         }
@@ -297,8 +339,18 @@
         }
 
         const candidate = receiveBuffer.slice(0, expectedFrameLength);
+        const candidateMeta = receiveByteMeta.slice(0, expectedFrameLength);
+        const candidateSessionId = candidateMeta[0]?.sessionId ?? -1;
+        const frameMeta = {
+          firstByteAt: candidateMeta[0]?.receivedAtMonotonic ?? Number.NEGATIVE_INFINITY,
+          lastByteAt: candidateMeta[candidateMeta.length - 1]?.receivedAtMonotonic ?? Number.NEGATIVE_INFINITY,
+          firstByteWallTime: candidateMeta[0]?.receivedAtMs ?? Date.now(),
+          sessionId: candidateSessionId,
+          sessionConsistent: candidateMeta.every((meta) => meta.sessionId === candidateSessionId)
+        };
         const validation = validateLegacyFrame(candidate, bodyLength);
-        renderDecodedFrame(candidate, bodyLength, validation);
+        const rendered = renderDecodedFrame(candidate, bodyLength, validation, frameMeta);
+        processIdentificationResponse(candidate, bodyLength, validation, rendered.sequenceNode, frameMeta);
 
         if (!validation.etxValid) {
           // The declared boundary has a bad terminator, so retain later bytes for a fresh STX search.
@@ -307,6 +359,7 @@
         }
 
         receiveBuffer = receiveBuffer.slice(expectedFrameLength);
+        receiveByteMeta = receiveByteMeta.slice(expectedFrameLength);
       }
       setMessage(frameStatus, `Assembler ready. ${receiveBuffer.length} unconsumed byte(s) buffered; no further command is sent automatically.`);
     }
@@ -337,35 +390,94 @@
       return Array.from(bytes, (byte) => byte >= 0x20 && byte <= 0x7e ? String.fromCharCode(byte) : ".").join("");
     }
 
-    function renderDecodedFrame(frame, declaredBodyLength, validation) {
+    function parseGvTags(payload) {
+      if (payload.length < 1) return { valid: false, error: "GV response has no tag-count byte.", tags: [] };
+      const tagCount = payload[0];
+      const tags = [];
+      let offset = 1;
+      for (let index = 0; index < tagCount; index += 1) {
+        if (offset + 2 > payload.length) {
+          return { valid: false, error: `GV tag ${index + 1} is missing its identifier or length byte.`, tags };
+        }
+        const tagId = payload[offset];
+        const valueLength = payload[offset + 1];
+        offset += 2;
+        if (offset + valueLength > payload.length) {
+          return { valid: false, error: `GV tag ${tagId} declares ${valueLength} value byte(s), beyond the response payload.`, tags };
+        }
+        tags.push({ tagId, value: payload.slice(offset, offset + valueLength) });
+        offset += valueLength;
+      }
+      return { valid: true, tags, trailing: payload.slice(offset) };
+    }
+
+    function getGiTypeInterpretation(frame, declaredBodyLength) {
+      if (declaredBodyLength < 5 || frame.length < 10) return "GI type fields unavailable: expected status at frame offset 5, a fixed-value field at offset 6, and machine type at 7.";
+      if (frame[5] !== 0x00) return `GI status at frame offset 5 is 0x${frame[5].toString(16).padStart(2, "0").toUpperCase()}; no type interpretation.`;
+      if (frame[6] !== 0x01) return `GI field at frame offset 6 is 0x${frame[6].toString(16).padStart(2, "0").toUpperCase()}, not required value 01; no type interpretation.`;
+      const type = frame[7];
+      let name = null;
+      if (type === 0) name = "Dryer";
+      if (type === 1) name = "Washer";
+      if (!name) return `GI machine type byte at frame offset 7 is 0x${type.toString(16).padStart(2, "0").toUpperCase()} (no source mapping).`;
+      if (selectedDevice?.name?.startsWith("Nn")) name += "_Stack";
+      return `GI machine type byte at frame offset 7: ${type} = ${name} (source mapping).`;
+    }
+
+    function renderDecodedFrame(frame, declaredBodyLength, validation, frameMeta) {
       const command = frame.slice(3, 5);
+      const commandText = asciiForBytes(command);
       const statusPresent = declaredBodyLength >= 3;
       const status = statusPresent ? frame[5] : null;
       const payloadStart = statusPresent ? 6 : 5;
       const payloadEnd = 3 + declaredBodyLength;
       const payload = frame.slice(payloadStart, Math.max(payloadStart, payloadEnd));
       const overallValid = validation.stxValid && validation.lengthValid && validation.etxValid && validation.lrcValid;
-
-      appendFrameLogEntry((entry) => {
+      let sequenceNode;
+      const frameReceivedAt = new Date(frameMeta.firstByteWallTime);
+      const entry = appendFrameLogEntry((logEntry) => {
         const heading = document.createElement("span");
         heading.className = "validation";
-        heading.textContent = ` — FRAME ${overallValid ? "VALID" : "INVALID"}; ${frame.length} total byte(s); declared body ${declaredBodyLength}`;
-        entry.append(heading);
+        heading.textContent = ` â€” FRAME ${overallValid ? "VALID" : "INVALID"}; ${frame.length} total byte(s); declared body ${declaredBodyLength}`;
+        logEntry.append(heading);
 
         const details = document.createElement("code");
-        details.textContent = [
-          `Command: ${formatHex(command)} (ASCII "${asciiForBytes(command)}")`,
+        const lines = [
+          `Command: ${formatHex(command)} (ASCII "${commandText}")`,
           `Status: ${statusPresent ? `0x${status.toString(16).padStart(2, "0").toUpperCase()}` : "not present"}`,
           `Payload: ${formatHex(payload) || "(empty)"}`,
+          `Frame receive session: ${frameMeta.sessionId} (${frameMeta.sessionConsistent ? "consistent" : "MIXED"}); first byte monotonic time: ${frameMeta.firstByteAt.toFixed(3)} ms; last byte: ${frameMeta.lastByteAt.toFixed(3)} ms`,
           `Checks: STX ${validation.stxValid ? "valid" : "INVALID"}; length ${validation.lengthValid ? "valid" : "INVALID"} (expected ${validation.expectedLength}, got ${frame.length}); ETX ${validation.etxValid ? "valid" : "INVALID"}; XOR/LRC ${validation.lrcValid ? "valid" : "INVALID"} (calculated 0x${validation.calculatedLrc.toString(16).padStart(2, "0").toUpperCase()})`,
           `Frame: ${formatHex(frame)}`
-        ].join("\n");
-        entry.append(details);
-      });
+        ];
+
+        if (overallValid && status === 0 && commandText === "GV") {
+          const parsed = parseGvTags(payload);
+          if (parsed.valid) {
+            lines.push(`GV tag count: ${payload[0]}`);
+            for (const tag of parsed.tags) {
+              const handled = [1, 2, 4, 14].includes(tag.tagId) ? "; Android parser handles this tag ID" : "";
+              lines.push(`GV tag ${tag.tagId}, length ${tag.value.length}, raw value: ${formatHex(tag.value) || "(empty)"}${handled}`);
+            }
+            if (parsed.trailing.length) lines.push(`GV trailing bytes after declared tags: ${formatHex(parsed.trailing)}`);
+          } else {
+            lines.push(`GV TLV parse diagnostic: ${parsed.error}`);
+          }
+        }
+        if (overallValid && commandText === "GI") lines.push(getGiTypeInterpretation(frame, declaredBodyLength));
+        details.textContent = lines.join("\n");
+        logEntry.append(details);
+
+        sequenceNode = document.createElement("span");
+        sequenceNode.className = "validation";
+        sequenceNode.textContent = "Sequence qualification: evaluatingâ€¦";
+        logEntry.append(sequenceNode);
+      }, frameReceivedAt);
 
       setMessage(frameStatus, overallValid
         ? `Valid legacy-format frame decoded (${frame.length} bytes). No follow-up command is sent automatically.`
         : `Invalid legacy-format candidate decoded (${frame.length} bytes); see validation details and resynchronization diagnostics.`, !overallValid);
+      return { entry, sequenceNode, commandText, status, payload, overallValid };
     }
 
     function discardPendingReceiveBytes(reason) {
@@ -373,6 +485,7 @@
         recordAssemblerDiagnostic(`${reason}; discarded ${receiveBuffer.length} incomplete buffered byte(s)`, receiveBuffer);
         receiveBuffer = new Uint8Array(0);
       }
+      receiveByteMeta = [];
     }
 
     function asciiBytes(text) {
@@ -385,16 +498,25 @@
       return new Uint8Array(bytes);
     }
 
-    function buildServiceRequestViFrame() {
-      // Mirrors MyServiceRequest2Fragment.m19793K(): vendor bytes + "TTI" + 0x01.
-      const vendor = asciiBytes(SERVICE_REQUEST_VENDOR_ID);
-      const marker = asciiBytes("TTI");
-      const command = new Uint8Array([0x56, 0x49]); // ASCII "VI"
-      const payload = new Uint8Array(vendor.length + marker.length + 1);
-      payload.set(vendor, 0);
-      payload.set(marker, vendor.length);
-      payload[payload.length - 1] = 0x01;
+    function buildIdentificationFrame(commandName) {
+      let payload;
+      if (commandName === "VI") {
+        // Mirrors MyServiceRequest2Fragment.m19793K(): vendor bytes + "TTI" + 0x01.
+        const vendor = asciiBytes(SERVICE_REQUEST_VENDOR_ID);
+        const marker = asciiBytes("TTI");
+        payload = new Uint8Array(vendor.length + marker.length + 1);
+        payload.set(vendor, 0);
+        payload.set(marker, vendor.length);
+        payload[payload.length - 1] = 0x01;
+      } else if (commandName === "GV") {
+        payload = new Uint8Array(0);
+      } else if (commandName === "GI") {
+        payload = new Uint8Array([0x01]);
+      } else {
+        throw new Error(`Unsupported identification command: ${commandName}`);
+      }
 
+      const command = asciiBytes(commandName);
       const bodyLength = command.length + payload.length;
       if (bodyLength > 0xffff) throw new Error("VI frame body is too large.");
       const frame = new Uint8Array(bodyLength + 5);
@@ -409,7 +531,7 @@
       for (let index = 1; index < 3 + bodyLength; index += 1) lrc ^= frame[index];
       frame[3 + bodyLength] = lrc;
       frame[4 + bodyLength] = 0x03;
-      return { frame, payload, bodyLength };
+      return { commandName, frame, payload, bodyLength };
     }
 
     function splitFrameIntoChunks(frame, maximumChunkBytes = 20) {
@@ -421,13 +543,16 @@
     }
 
     function getAndroidCompatibleWriteMode(characteristic) {
-      // Android's BluetoothGattCharacteristic defaults to no-response when that property is present.
-      if (characteristic.properties.writeWithoutResponse) return "without response";
-      if (characteristic.properties.write) return "with response";
+      // BluetoothLeService calls writeCharacteristic() without setting or inspecting write type.
+      // Do not guess Android's effective mode from the advertised properties.
+      void characteristic;
       return null;
     }
 
     function writeChunk(characteristic, chunk, mode) {
+      if (mode !== "without response" && mode !== "with response") {
+        throw new Error("Android-compatible GATT write mode is unresolved; refusing to write.");
+      }
       const methodName = mode === "without response" ? "writeValueWithoutResponse" : "writeValueWithResponse";
       const method = characteristic[methodName];
       if (typeof method !== "function") {
@@ -436,16 +561,20 @@
       return method.call(characteristic, chunk);
     }
 
-    function appendViAttemptLog(frame, chunks, mode) {
+    function appendIdentificationAttemptLog(commandName, frame, chunks, mode, request) {
       const entry = document.createElement("li");
       const time = document.createElement("time");
-      const startedAt = new Date();
+      const startedAt = new Date(request.startedAtWallTime);
       time.dateTime = startedAt.toISOString();
       time.textContent = startedAt.toLocaleString();
       entry.append(time);
 
+      const requestLine = document.createElement("code");
+      requestLine.textContent = `Request ${request.requestId}; connection session ${request.sessionId}; initiated at ${startedAt.toLocaleString()} (${request.startedAtMonotonic.toFixed(3)} ms monotonic).`;
+      entry.append(requestLine);
+
       const frameLine = document.createElement("code");
-      frameLine.textContent = `Outbound VI frame (${frame.length} bytes): ${formatHex(frame)}`;
+      frameLine.textContent = `Outbound ${commandName} frame (${frame.length} bytes): ${formatHex(frame)}`;
       entry.append(frameLine);
 
       const chunksLine = document.createElement("code");
@@ -464,35 +593,129 @@
       return resultElements;
     }
 
-    async function sendServiceRequestViOnce() {
-      if (viAttempted || viSending) return;
+    function getAwaitedIdentificationCommand() {
+      for (const commandName of ["VI", "GV", "GI"]) {
+        const step = identificationSequence[commandName];
+        if (step.attempted && !step.responseAccepted) return commandName;
+      }
+      return null;
+    }
+
+    function acceptIdentificationResponse(commandName, sequenceNode) {
+      const step = identificationSequence[commandName];
+      if (!step || step.responseAccepted) return;
+      step.responseAccepted = true;
+      step.pendingResponse = null;
+      if (sequenceNode) sequenceNode.textContent = `Sequence qualification: YES â€” valid ${commandName} frame, matching command, success status 00, and write operation resolved.`;
+      if (commandName === "VI") {
+        setMessage(sequenceStatus, "VI response accepted. GV is unlocked; send it manually when ready.");
+      } else if (commandName === "GV") {
+        setMessage(sequenceStatus, "GV response accepted. GI is unlocked; send it manually when ready.");
+      } else {
+        setMessage(sequenceStatus, "GI response accepted. Identification response sequence is complete; no operation command was sent.");
+      }
+      updateCaptureControls();
+    }
+
+    function processIdentificationResponse(frame, declaredBodyLength, validation, sequenceNode, frameMeta) {
+      const overallValid = validation.stxValid && validation.lengthValid && validation.etxValid && validation.lrcValid;
+      const commandName = asciiForBytes(frame.slice(3, 5));
+      const hasStatus = declaredBodyLength >= 3;
+      const status = hasStatus ? frame[5] : null;
+      const awaitedCommand = getAwaitedIdentificationCommand();
+      let qualification;
+
+      if (!overallValid) {
+        qualification = "NO â€” frame validation failed.";
+      } else if (!["VI", "GV", "GI"].includes(commandName)) {
+        qualification = `NO â€” unrelated command ${commandName}; not a sequence response.`;
+      } else if (!awaitedCommand) {
+        qualification = `NO â€” no ${commandName} response is currently awaited.`;
+      } else if (commandName !== awaitedCommand) {
+        qualification = `NO â€” received ${commandName}, but the current step awaits ${awaitedCommand}.`;
+      } else if (!identificationSequence[commandName]?.request) {
+        qualification = `NO â€” no request timestamp/session is recorded for ${commandName}.`;
+      } else if (!frameMeta.sessionConsistent) {
+        qualification = `NO â€” ${commandName} frame contains bytes from more than one local connection session.`;
+      } else if (frameMeta.sessionId !== identificationSequence[commandName].request.sessionId || frameMeta.sessionId !== identificationSession) {
+        qualification = `NO â€” ${commandName} frame belongs to connection session ${frameMeta.sessionId}, not the active request session.`;
+      } else if (frameMeta.firstByteAt <= identificationSequence[commandName].request.startedAtMonotonic) {
+        qualification = `NO â€” ${commandName} frame began before request ${identificationSequence[commandName].request.requestId}; it cannot unlock the next step.`;
+      } else if (!hasStatus) {
+        qualification = `NO â€” ${commandName} frame has no status byte.`;
+      } else if (status !== 0x00) {
+        qualification = `NO â€” ${commandName} status is 0x${status.toString(16).padStart(2, "0").toUpperCase()}, not success 00.`;
+      } else if (commandName === "GV" && !parseGvTags(frame.slice(6, 3 + declaredBodyLength)).valid) {
+        qualification = "NO â€” GV outer frame/status passed, but its count-delimited tag payload is malformed.";
+      } else {
+        const step = identificationSequence[commandName];
+        if (!step.attempted) {
+          qualification = `NO â€” ${commandName} was not sent in this connection.`;
+        } else if (step.writeStatus === "failed") {
+          qualification = `NO â€” the ${commandName} write failed; no retry is allowed this connection.`;
+        } else if (step.pendingResponse) {
+          qualification = `NO â€” another ${commandName} success response is already pending write completion.`;
+        } else if (step.writeStatus === "pending") {
+          qualification = `PENDING â€” matching ${commandName} success response arrived before the write promise resolved.`;
+          step.pendingResponse = { sequenceNode, frameMeta, requestId: step.request.requestId };
+        } else if (step.writeStatus === "resolved") {
+          qualification = `YES â€” ${commandName} frame began after request ${step.request.requestId} in session ${step.request.sessionId}; command and status qualify.`;
+          acceptIdentificationResponse(commandName, sequenceNode);
+        } else {
+          qualification = `NO â€” no completed ${commandName} write is recorded.`;
+        }
+      }
+
+      if (!sequenceNode?.textContent?.startsWith("Sequence qualification: YES")) {
+        sequenceNode.textContent = `Sequence qualification: ${qualification}`;
+      }
+      if (awaitedCommand && commandName === awaitedCommand && !qualification.startsWith("YES") && !qualification.startsWith("PENDING")) {
+        setMessage(sequenceStatus, `${qualification} No next command was unlocked.`);
+      }
+      return qualification;
+    }
+
+    async function sendIdentificationCommand(commandName) {
+      const step = identificationSequence[commandName];
+      if (!step || step.attempted || commandSending) return;
       if (!selectedDevice?.gatt?.connected || !ffe1Characteristic || !captureActive) {
-        setMessage(viStatus, "VI is locked until connected FFE1 is discovered and notification capture is active.", true);
+        setMessage(viStatus, `${commandName} is locked until connected FFE1 is discovered and notification capture is active.`, true);
         updateCaptureControls();
         return;
       }
+      if (commandName === "GV" && !identificationSequence.VI.responseAccepted) return;
+      if (commandName === "GI" && !identificationSequence.GV.responseAccepted) return;
 
       const mode = getAndroidCompatibleWriteMode(ffe1Characteristic);
       if (!mode) {
-        setMessage(viStatus, "FFE1 does not expose a supported write property.", true);
+        setMessage(viStatus, "Protocol write blocked: the decompiled Android service does not explicitly set its GATT write type, so an Android-compatible Web Bluetooth write mode cannot be verified from source.", true);
         updateCaptureControls();
         return;
       }
 
       let request;
       try {
-        request = buildServiceRequestViFrame();
+        request = buildIdentificationFrame(commandName);
       } catch (error) {
-        setMessage(viStatus, error?.message || "Could not build the VI frame.", true);
+        setMessage(viStatus, error?.message || `Could not build the ${commandName} frame.`, true);
         return;
       }
 
       const chunks = splitFrameIntoChunks(request.frame, 20);
-      viAttempted = true;
-      viSending = true;
-      const chunkResults = appendViAttemptLog(request.frame, chunks, mode);
+      discardPendingReceiveBytes(`pre-request bytes cleared before ${commandName}`);
+      const startedAtWallTime = new Date();
+      const startedAtMonotonic = performance.now();
+      const requestId = `session-${identificationSession}-request-${++requestSequenceNumber}`;
+      step.request = { requestId, sessionId: identificationSession, startedAtWallTime, startedAtMonotonic };
+      step.attempted = true;
+      step.writeStatus = "pending";
+      commandSending = true;
+      const sessionAtSend = identificationSession;
+      const characteristicAtSend = ffe1Characteristic;
+      const chunkResults = appendIdentificationAttemptLog(commandName, request.frame, chunks, mode, step.request);
       updateCaptureControls();
-      setMessage(viStatus, `Sending one ${request.frame.length}-byte VI frame in ${chunks.length} chunk(s), ${mode}. No follow-up command will be sent.`);
+      setMessage(viStatus, `Sending one ${commandName} frame in ${chunks.length} chunk(s), ${mode}. No next command will be sent automatically.`);
+      setMessage(sequenceStatus, `${commandName} write in progress. The next step stays locked until a valid matching success response is received.`);
 
       let failed = false;
       for (let index = 0; index < chunks.length; index += 1) {
@@ -500,7 +723,7 @@
         const resultElement = chunkResults[index];
         const attemptedAt = new Date().toLocaleString();
         try {
-          await writeChunk(ffe1Characteristic, chunk.bytes, mode);
+          await writeChunk(characteristicAtSend, chunk.bytes, mode);
           resultElement.textContent = `Chunk ${index + 1}/${chunks.length} at ${attemptedAt}: write promise resolved (${mode}).`;
         } catch (error) {
           failed = true;
@@ -512,11 +735,24 @@
         }
       }
 
-      viSending = false;
+      if (sessionAtSend !== identificationSession) return;
+      step.writeStatus = failed ? "failed" : "resolved";
+      commandSending = false;
+      if (failed) {
+        if (step.pendingResponse?.sequenceNode) {
+          step.pendingResponse.sequenceNode.textContent = `Sequence qualification: NO â€” ${commandName} write failed; this response cannot unlock the next step.`;
+        }
+        step.pendingResponse = null;
+        setMessage(sequenceStatus, `${commandName} write failed. This step remains consumed and the next command stays locked until reconnect.`);
+      } else if (step.pendingResponse) {
+        acceptIdentificationResponse(commandName, step.pendingResponse.sequenceNode);
+      } else {
+        setMessage(sequenceStatus, `${commandName} write operation resolved; waiting for a valid matching response with status 00.`);
+      }
       updateCaptureControls();
       setMessage(viStatus, failed
-        ? "VI attempt failed and remains locked for this connection. Inspect the outbound log; no retry or follow-up command was sent."
-        : `VI write completed and remains locked for this connection. ${mode === "without response" ? "A resolved write-without-response promise is not a peripheral acknowledgement." : "The write-with-response operation completed."} Wait for notifications; no GV/GI follow-up is automatic.` , failed);
+        ? `${commandName} attempt failed and remains locked for this connection. No retry or later command was sent.`
+        : `${commandName} write operation resolved${mode === "without response" ? "; this is not a peripheral acknowledgement" : ""}. Wait for the matching protocol response; no later command is automatic.`, failed);
     }
 
     function browserErrorMessage(error) {
@@ -550,8 +786,6 @@
 
     function handleDisconnect() {
       discardPendingReceiveBytes("disconnected");
-      viAttempted = false;
-      viSending = false;
       chooseButton.disabled = false;
       disconnectButton.disabled = true;
       connectButton.disabled = false;
@@ -565,7 +799,7 @@
       gattResults.replaceChildren();
       setMessage(connectionStatus, "Disconnected.");
       setMessage(captureStatus, "Disconnected; the notification listener has been removed. Captured entries remain until cleared.");
-      updateCaptureControls();
+      resetIdentificationSequence("Disconnected. Sequence state reset; a new connection starts at VI.");
       updateMatch();
     }
 
@@ -575,7 +809,7 @@
         return;
       }
       chooseButton.disabled = true;
-      setMessage(connectionStatus, "Waiting for device selection…");
+      setMessage(connectionStatus, "Waiting for device selectionâ€¦");
       try {
         const device = await navigator.bluetooth.requestDevice({
           filters: [{ namePrefix: "Nn" }],
@@ -586,9 +820,7 @@
         selectedDevice.addEventListener("gattserverdisconnected", handleDisconnect);
         ffe1Characteristic = null;
         discardPendingReceiveBytes("new device selected");
-        viAttempted = false;
-        viSending = false;
-        updateCaptureControls();
+        resetIdentificationSequence("New device selected. Sequence state reset; connect and start notifications before VI.");
         const name = device.name || "(advertised name unavailable)";
         const suffix = name.match(/(\d{3})$/);
         selectedSuffixNumber = suffix ? Number(suffix[1]) : null;
@@ -623,16 +855,14 @@
       connectButton.disabled = true;
       confirmCheckbox.disabled = true;
       chooseButton.disabled = true;
-      setMessage(connectionStatus, "Connecting…");
+      setMessage(connectionStatus, "Connectingâ€¦");
       try {
-        viAttempted = false;
-        viSending = false;
-        updateCaptureControls();
+        resetIdentificationSequence("New connection. Sequence state reset; VI is ready only after notifications start.");
         const server = await selectedDevice.gatt.connect();
         disconnectButton.disabled = false;
-        setMessage(connectionStatus, "Connected. Inspecting accessible GATT metadata…");
+        setMessage(connectionStatus, "Connected. Inspecting accessible GATT metadataâ€¦");
         notificationPanel.hidden = false;
-        setMessage(captureStatus, "Looking for FFE1 in accessible GATT services…");
+        setMessage(captureStatus, "Looking for FFE1 in accessible GATT servicesâ€¦");
         await inspectGatt(server);
         setMessage(connectionStatus, "Connected. GATT metadata inspection complete; no characteristic values were read.");
       } catch (error) {
@@ -667,7 +897,7 @@
           return;
         }
         captureActive = true;
-        setMessage(captureStatus, "Notification capture is active. VI is sent only by its separate explicit button.");
+        setMessage(captureStatus, "Notification capture is active. Identification commands require their separate explicit buttons and response gates.");
       } catch (error) {
         characteristic.removeEventListener("characteristicvaluechanged", onFfe1Notification);
         setMessage(captureStatus, `Could not start notifications: ${browserErrorMessage(error)}`, true);
@@ -677,7 +907,9 @@
       }
     });
 
-    sendViButton.addEventListener("click", sendServiceRequestViOnce);
+    sendViButton.addEventListener("click", () => sendIdentificationCommand("VI"));
+    sendGvButton.addEventListener("click", () => sendIdentificationCommand("GV"));
+    sendGiButton.addEventListener("click", () => sendIdentificationCommand("GI"));
 
     stopCaptureButton.addEventListener("click", async () => {
       if (!captureActive || !ffe1Characteristic || !selectedDevice?.gatt?.connected) return;
@@ -707,8 +939,9 @@
       frameCount.textContent = "0";
       viLog.replaceChildren();
       receiveBuffer = new Uint8Array(0);
+      receiveByteMeta = [];
       setMessage(frameStatus, "Logs and incomplete frame buffer cleared. Capture remains passive.");
-      setMessage(viStatus, viAttempted
+      setMessage(viStatus, identificationSequence.VI.attempted
         ? "Logs cleared. VI remains locked for this connection; disconnect and reconnect to re-arm."
         : "Logs cleared. VI remains available only while connected and capturing notifications.");
     });
@@ -811,3 +1044,4 @@
   </script>
 </body>
 </html>
+
