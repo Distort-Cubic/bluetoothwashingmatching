@@ -1,238 +1,294 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="color-scheme" content="dark light">
-<title>Kiosoft BLE VI Diagnostic</title>
-<style>
-:root{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color-scheme:dark;background:#10151d;color:#edf2f7}
-*{box-sizing:border-box}body{margin:0;padding:20px;max-width:900px;margin-inline:auto}
-h1{font-size:1.35rem;margin:0 0 6px}p{color:#b8c3d1;line-height:1.45}
-.panel{background:#1a2330;border:1px solid #344255;border-radius:12px;padding:16px;margin:14px 0}
-.actions{display:flex;gap:10px;flex-wrap:wrap}
-button{border:0;border-radius:9px;padding:12px 15px;font:inherit;font-weight:650;background:#2868c7;color:white}
-button.secondary{background:#354457}button.danger{background:#8d3942}button:disabled{opacity:.45}
-.status{font-weight:650}.good{color:#7ddba5}.bad{color:#ff9a9a}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1017;border-radius:8px;padding:12px;min-height:48px;color:#d9e7fa}
-label{display:block;margin:10px 0 5px;color:#b8c3d1;font-size:.9rem}
-small{color:#aab6c5}.kv{display:grid;grid-template-columns:150px 1fr;gap:7px;font-size:.92rem}
-.kv div:nth-child(odd){color:#aab6c5}
-.notice{border-left:3px solid #d5a84b;padding-left:12px}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Nn Bluetooth inspection</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font: 16px/1.5 system-ui, sans-serif;
+      --panel: color-mix(in srgb, Canvas 94%, CanvasText 6%);
+      --border: color-mix(in srgb, CanvasText 22%, transparent);
+      --muted: color-mix(in srgb, CanvasText 70%, transparent);
+      --accent: #1769aa;
+      --error: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body { max-width: 880px; margin: 0 auto; padding: 24px; }
+    h1 { line-height: 1.2; }
+    button, input { font: inherit; }
+    button { padding: 0.6rem 0.9rem; cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
+    input { padding: 0.5rem; width: 8rem; }
+    .card { border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin: 16px 0; background: var(--panel); }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .muted { color: var(--muted); }
+    .status { min-height: 1.5em; }
+    .error { color: var(--error); }
+    .device-name { font-size: 1.25rem; font-weight: 650; overflow-wrap: anywhere; }
+    .service { margin: 14px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+    .service h3 { margin: 0 0 8px; font-size: 1rem; overflow-wrap: anywhere; }
+    .characteristic { padding: 10px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+    .properties { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; font-size: 0.9rem; }
+    .properties span::before { content: ""; display: inline-block; width: 0.65em; height: 0.65em; margin-right: 0.4em; border-radius: 50%; background: var(--border); }
+    .properties span.yes::before { background: #238636; }
+    .confirm { display: flex; gap: 9px; align-items: flex-start; margin: 14px 0; }
+    .confirm input { width: auto; margin-top: 0.4rem; }
+    code { overflow-wrap: anywhere; }
+    @media (max-width: 560px) { body { padding: 16px; } }
+  </style>
 </head>
 <body>
-<h1>Kiosoft BLE — VI diagnostic</h1>
-<p>Connect to one machine, enable notifications, send only the initial <code>VI</code> identification request, and save the raw response. This page does not send GI, CS, SE, or machine-operation commands.</p>
+  <main>
+    <h1>Nn Bluetooth inspection</h1>
+    <p>This prototype discovers an Nn device, asks you to confirm its sticker number, connects, and lists accessible GATT services and characteristic properties. It does not read characteristic values, write data, enable notifications, authenticate, or control the machine.</p>
 
-<section class="panel">
-  <div class="status" id="status">Not connected</div>
-  <p id="deviceLabel">No device selected.</p>
-  <div class="actions">
-    <button id="connect">Choose and connect to BLE device</button>
-    <button id="disconnect" class="secondary" disabled>Disconnect</button>
-  </div>
-  <div id="deviceInfo" class="kv" style="margin-top:15px"></div>
-</section>
+    <section class="card" aria-labelledby="support-title">
+      <h2 id="support-title">Browser requirements</h2>
+      <p>Use a compatible Chromium browser with Bluetooth enabled. Web Bluetooth requires a secure context, such as <code>http://localhost</code> or HTTPS. Opening this file directly may not provide a supported secure context.</p>
+      <p id="support-status" class="status" role="status"></p>
+    </section>
 
-<section class="panel">
-  <h2 style="font-size:1.05rem;margin-top:0">VI request</h2>
-  <p>Vendor ID <code>33333</code>, followed by ASCII <code>TTI</code> and byte <code>01</code>.</p>
-  <label>Frame that will be sent</label>
-  <pre id="requestHex">02 00 0B 56 49 33 33 33 33 33 54 54 49 01 6F 03</pre>
-  <div class="actions">
-    <button id="send" disabled>Send VI once</button>
-    <button id="clear" class="secondary">Clear capture</button>
-  </div>
-  <p class="notice"><small>Only press Send VI once per connection unless you have a reason to repeat the diagnostic. The machine may respond with capability or status information.</small></p>
-</section>
+    <section class="card" aria-labelledby="discovery-title">
+      <h2 id="discovery-title">1. Choose an Nn device</h2>
+      <div class="row">
+        <button id="choose-button" type="button">Choose Nn device</button>
+        <label for="sticker-number">Two-digit sticker number</label>
+        <input id="sticker-number" type="text" inputmode="numeric" pattern="[0-9]{2}" maxlength="2" placeholder="e.g. 04" autocomplete="off">
+      </div>
+      <div id="selection" hidden>
+        <p>Selected advertised name: <span id="device-name" class="device-name"></span></p>
+        <p>Final three digits: <code id="name-suffix"></code>; numeric comparison value: <code id="name-number"></code></p>
+        <p id="match-status" class="status" role="status"></p>
+        <label class="confirm"><input id="confirm-device" type="checkbox" disabled> <span>I confirm that this is the Nn machine whose sticker number I entered. Connect only after I press the button below.</span></label>
+        <button id="connect-button" type="button" disabled>Connect and inspect</button>
+      </div>
+    </section>
 
-<section class="panel">
-  <h2 style="font-size:1.05rem;margin-top:0">Received notifications</h2>
-  <div id="rxStatus" class="status">Waiting for connection.</div>
-  <label>Notification packets (hex)</label>
-  <pre id="packets">No notifications received.</pre>
-  <label>Combined byte stream</label>
-  <pre id="stream">—</pre>
-  <label>Complete framed messages (if detected)</label>
-  <pre id="frames">—</pre>
-  <div class="actions">
-    <button id="export" class="secondary">Export diagnostic JSON</button>
-  </div>
-</section>
-<p><small>Browser requirements: Web Bluetooth in a supported browser, Bluetooth enabled, and a secure context (HTTPS or localhost). The Android chooser is controlled by the browser. Select the machine manually.</small></p>
+    <section class="card" aria-labelledby="connection-title">
+      <h2 id="connection-title">2. Connection and GATT inspection</h2>
+      <p id="connection-status" class="status" role="status">Not connected.</p>
+      <button id="disconnect-button" type="button" disabled>Disconnect</button>
+      <div id="gatt-results" aria-live="polite"></div>
+    </section>
 
-<script>
-(() => {
-  const SERVICE = '0000ffe0-0000-1000-8000-00805f9b34fb';
-  const CHARACTERISTIC = '0000ffe1-0000-1000-8000-00805f9b34fb';
-  const $ = id => document.getElementById(id);
-  let device = null, server = null, characteristic = null;
-  let notifications = [], stream = [], completeFrames = [], sentAt = null;
-  let viSent = false;
+    <p class="muted">GATT metadata describes what the device exposes. A listed write property is only reported; this page never uses it.</p>
+  </main>
 
-  const bytesToHex = bytes => Array.from(bytes, b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
-  const setStatus = (text, good=false) => {
-    $('status').textContent = text;
-    $('status').className = 'status ' + (good ? 'good' : '');
-  };
-  const render = () => {
-    $('packets').textContent = notifications.length
-      ? notifications.map((n,i)=>`${i+1}. ${n.at}\n${n.hex}`).join('\n\n')
-      : 'No notifications received.';
-    $('stream').textContent = stream.length ? bytesToHex(stream) : '—';
-    $('frames').textContent = completeFrames.length
-      ? completeFrames.map((f,i)=>`${i+1}. ${f.hex}`).join('\n')
-      : 'No complete frames detected yet.';
-  };
-  function parseFrames() {
-    // Kiosoft frame: 02 | 2-byte length | command/payload | LRC | 03.
-    // The app's receive check uses totalFrameLength - 5 === declaredLength.
-    let buf = stream.slice();
-    while (buf.length >= 5) {
-      const start = buf.indexOf(0x02);
-      if (start < 0) break;
-      if (start > 0) { buf = buf.slice(start); continue; }
-      const declared = (buf[1] << 8) | buf[2];
-      const total = declared + 5;
-      if (total < 5 || total > 8192) break;
-      if (buf.length < total) break;
-      const frame = buf.slice(0,total);
-      if (frame[total-1] === 0x03) {
-        const key = bytesToHex(frame);
-        if (!completeFrames.some(x => x.hex === key)) {
-          completeFrames.push({at:new Date().toISOString(),hex:key,bytes:frame});
+  <script>
+    "use strict";
+
+    const OPTIONAL_SERVICES = [
+      "49535343-fe7d-4ae5-8fa9-9fafd205e455", // ME51 service from the Android app constants
+      "0000ffe0-0000-1000-8000-00805f9b34fb"  // FFE0 service from the Android app constants
+    ];
+
+    const chooseButton = document.querySelector("#choose-button");
+    const stickerInput = document.querySelector("#sticker-number");
+    const selection = document.querySelector("#selection");
+    const nameOutput = document.querySelector("#device-name");
+    const suffixOutput = document.querySelector("#name-suffix");
+    const numberOutput = document.querySelector("#name-number");
+    const matchStatus = document.querySelector("#match-status");
+    const confirmCheckbox = document.querySelector("#confirm-device");
+    const connectButton = document.querySelector("#connect-button");
+    const disconnectButton = document.querySelector("#disconnect-button");
+    const connectionStatus = document.querySelector("#connection-status");
+    const gattResults = document.querySelector("#gatt-results");
+
+    let selectedDevice = null;
+    let selectedSuffixNumber = null;
+
+    function setMessage(element, message, isError = false) {
+      element.textContent = message;
+      element.classList.toggle("error", isError);
+    }
+
+    function browserErrorMessage(error) {
+      if (error?.name === "NotFoundError") return "No device was selected, or the chooser was cancelled.";
+      if (error?.name === "SecurityError") return "Bluetooth access was blocked. Use HTTPS or localhost and allow Bluetooth for this page.";
+      if (error?.name === "NotSupportedError") return "This browser or device does not support the requested Web Bluetooth operation.";
+      if (error?.name === "NetworkError") return "The Bluetooth connection failed or the device is unavailable.";
+      if (error?.name === "InvalidStateError") return "The Bluetooth adapter is unavailable or turned off.";
+      return error?.message || "An unexpected Bluetooth error occurred.";
+    }
+
+    function updateMatch() {
+      const stickerText = stickerInput.value.trim();
+      const stickerValid = /^\d{2}$/.test(stickerText);
+      const sameNumber = stickerValid && selectedSuffixNumber !== null && Number(stickerText) === selectedSuffixNumber;
+      confirmCheckbox.checked = false;
+      confirmCheckbox.disabled = !sameNumber || !selectedDevice?.gatt || selectedDevice.gatt.connected;
+      connectButton.disabled = !sameNumber || !confirmCheckbox.checked || selectedDevice?.gatt?.connected;
+      if (!selectedDevice) {
+        setMessage(matchStatus, "Choose an Nn device, then enter the two-digit sticker number.");
+      } else if (!stickerValid) {
+        setMessage(matchStatus, "Enter exactly two digits from the machine sticker.");
+      } else if (selectedSuffixNumber === null) {
+        setMessage(matchStatus, "The advertised name does not end in three digits, so it cannot be matched.", true);
+      } else if (!sameNumber) {
+        setMessage(matchStatus, "The sticker number does not match the final three digits of this name.", true);
+      } else {
+        setMessage(matchStatus, "Numbers match. Confirm the physical machine before connecting.");
+      }
+    }
+
+    function handleDisconnect() {
+      chooseButton.disabled = false;
+      disconnectButton.disabled = true;
+      connectButton.disabled = false;
+      confirmCheckbox.disabled = false;
+      confirmCheckbox.checked = false;
+      gattResults.replaceChildren();
+      setMessage(connectionStatus, "Disconnected.");
+      updateMatch();
+    }
+
+    chooseButton.addEventListener("click", async () => {
+      if (!navigator.bluetooth) {
+        setMessage(document.querySelector("#support-status"), "Web Bluetooth is unavailable in this browser or context.", true);
+        return;
+      }
+      chooseButton.disabled = true;
+      setMessage(connectionStatus, "Waiting for device selection…");
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: "Nn" }],
+          optionalServices: OPTIONAL_SERVICES
+        });
+        if (selectedDevice) selectedDevice.removeEventListener("gattserverdisconnected", handleDisconnect);
+        selectedDevice = device;
+        selectedDevice.addEventListener("gattserverdisconnected", handleDisconnect);
+        const name = device.name || "(advertised name unavailable)";
+        const suffix = name.match(/(\d{3})$/);
+        selectedSuffixNumber = suffix ? Number(suffix[1]) : null;
+        nameOutput.textContent = name;
+        suffixOutput.textContent = suffix ? suffix[1] : "not found";
+        numberOutput.textContent = selectedSuffixNumber === null ? "not available" : String(selectedSuffixNumber);
+        selection.hidden = false;
+        gattResults.replaceChildren();
+        setMessage(connectionStatus, "Device selected. Not connected.");
+        updateMatch();
+      } catch (error) {
+        setMessage(connectionStatus, browserErrorMessage(error), true);
+      } finally {
+        chooseButton.disabled = Boolean(selectedDevice?.gatt?.connected);
+      }
+    });
+
+    stickerInput.addEventListener("input", updateMatch);
+    confirmCheckbox.addEventListener("change", () => {
+      const stickerText = stickerInput.value.trim();
+      const matches = /^\d{2}$/.test(stickerText) && selectedSuffixNumber !== null && Number(stickerText) === selectedSuffixNumber;
+      connectButton.disabled = !matches || !confirmCheckbox.checked || selectedDevice?.gatt?.connected;
+    });
+
+    connectButton.addEventListener("click", async () => {
+      const stickerText = stickerInput.value.trim();
+      const numberMatches = /^\d{2}$/.test(stickerText) && selectedSuffixNumber !== null && Number(stickerText) === selectedSuffixNumber;
+      if (!selectedDevice || !numberMatches || !confirmCheckbox.checked) {
+        setMessage(connectionStatus, "Select an Nn device, match its number, and confirm before connecting.", true);
+        return;
+      }
+      connectButton.disabled = true;
+      confirmCheckbox.disabled = true;
+      chooseButton.disabled = true;
+      setMessage(connectionStatus, "Connecting…");
+      try {
+        const server = await selectedDevice.gatt.connect();
+        disconnectButton.disabled = false;
+        setMessage(connectionStatus, "Connected. Inspecting accessible GATT metadata…");
+        await inspectGatt(server);
+        setMessage(connectionStatus, "Connected. GATT metadata inspection complete; no characteristic values were read.");
+      } catch (error) {
+        setMessage(connectionStatus, browserErrorMessage(error), true);
+        chooseButton.disabled = Boolean(selectedDevice?.gatt?.connected);
+        connectButton.disabled = false;
+        confirmCheckbox.disabled = false;
+      }
+    });
+
+    disconnectButton.addEventListener("click", () => {
+      if (selectedDevice?.gatt?.connected) selectedDevice.gatt.disconnect();
+      else handleDisconnect();
+    });
+
+    async function inspectGatt(server) {
+      gattResults.replaceChildren();
+      let services;
+      try {
+        services = await server.getPrimaryServices();
+      } catch (error) {
+        gattResults.append(makeNotice(`Could not enumerate primary services: ${browserErrorMessage(error)}`, true));
+        return;
+      }
+      if (services.length === 0) {
+        gattResults.append(makeNotice("No accessible primary services were returned."));
+        return;
+      }
+      for (const service of services) {
+        const serviceSection = document.createElement("section");
+        serviceSection.className = "service";
+        const heading = document.createElement("h3");
+        heading.textContent = `Service ${service.uuid}${service.isPrimary ? " (primary)" : ""}`;
+        serviceSection.append(heading);
+        try {
+          const characteristics = await service.getCharacteristics();
+          if (characteristics.length === 0) {
+            serviceSection.append(makeNotice("No accessible characteristics were returned."));
+          }
+          for (const characteristic of characteristics) {
+            serviceSection.append(renderCharacteristic(characteristic));
+          }
+        } catch (error) {
+          serviceSection.append(makeNotice(`Could not enumerate characteristics: ${browserErrorMessage(error)}`, true));
         }
-        buf = buf.slice(total);
-      } else {
-        buf = buf.slice(1);
+        gattResults.append(serviceSection);
       }
     }
-  }
-  function onNotification(event) {
-    const value = event.target.value;
-    const bytes = Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
-    notifications.push({at:new Date().toISOString(),hex:bytesToHex(bytes),bytes});
-    stream.push(...bytes);
-    parseFrames();
-    $('rxStatus').textContent = `Received ${notifications.length} notification packet(s), ${stream.length} byte(s) total.`;
-    render();
-  }
-  function onDisconnected() {
-    setStatus('Disconnected');
-    $('deviceLabel').textContent = device ? device.name || '(unnamed device)' : 'No device selected.';
-    $('connect').disabled = false;
-    $('disconnect').disabled = true;
-    $('send').disabled = true;
-    characteristic = null;
-    server = null;
-  }
-  async function connect() {
-    if (!navigator.bluetooth) {
-      setStatus('Web Bluetooth is unavailable in this browser.');
-      return;
-    }
-    try {
-      setStatus('Opening device chooser…');
-      device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: [SERVICE]
-      });
-      device.addEventListener('gattserverdisconnected', onDisconnected);
-      $('deviceLabel').textContent = device.name || '(unnamed device)';
-      setStatus('Connecting…');
-      server = await device.gatt.connect();
-      const service = await server.getPrimaryService(SERVICE);
-      characteristic = await service.getCharacteristic(CHARACTERISTIC);
-      await characteristic.startNotifications();
-      characteristic.addEventListener('characteristicvaluechanged', onNotification);
-      const p = characteristic.properties;
-      $('deviceInfo').innerHTML = `
-        <div>Device name</div><div></div>
-        <div>Device ID</div><div></div>
-        <div>Service UUID</div><div>${SERVICE}</div>
-        <div>Characteristic UUID</div><div>${CHARACTERISTIC}</div>
-        <div>Read / Write</div><div>${p.read} / ${p.write}</div>
-        <div>Write without response</div><div>${p.writeWithoutResponse}</div>
-        <div>Notify / Indicate</div><div>${p.notify} / ${p.indicate}</div>`;
-      $('deviceInfo').children[1].textContent = device.name || '(unnamed)';
-      $('deviceInfo').children[3].textContent = device.id || '(not exposed)';
-      setStatus('Connected; notifications enabled.', true);
-      $('rxStatus').textContent = 'Notifications enabled; waiting for VI response.';
-      $('connect').disabled = true;
-      $('disconnect').disabled = false;
-      $('send').disabled = !(p.write || p.writeWithoutResponse);
-    } catch (e) {
-      setStatus(`${e.name || 'Error'}: ${e.message || e}`);
-      $('connect').disabled = false;
-      $('send').disabled = true;
-    }
-  }
-  async function sendVI() {
-    if (!characteristic || !device?.gatt?.connected) return;
-    if (viSent) {
-      if (!confirm('VI has already been sent on this connection. Send it again?')) return;
-    }
-    // Frame bytes: 02, length 000B, command "VI", payload 333333333354544901,
-    // XOR LRC 6F, terminator 03.
-    const frame = new Uint8Array([
-      0x02,0x00,0x0B,0x56,0x49,
-      0x33,0x33,0x33,0x33,0x33,0x54,0x54,0x49,0x01,
-      0x6F,0x03
-    ]);
-    try {
-      $('send').disabled = true;
-      setStatus('Sending VI…');
-      sentAt = new Date().toISOString();
-      if (characteristic.properties.write) {
-        await characteristic.writeValueWithResponse(frame);
-      } else {
-        await characteristic.writeValueWithoutResponse(frame);
+
+    function renderCharacteristic(characteristic) {
+      const item = document.createElement("div");
+      item.className = "characteristic";
+      const label = document.createElement("strong");
+      label.textContent = `Characteristic ${characteristic.uuid}`;
+      item.append(label);
+      const properties = document.createElement("div");
+      properties.className = "properties";
+      for (const [labelText, key] of [
+        ["Read", "read"],
+        ["Write", "write"],
+        ["Write without response", "writeWithoutResponse"],
+        ["Notify", "notify"],
+        ["Indicate", "indicate"]
+      ]) {
+        const value = Boolean(characteristic.properties[key]);
+        const badge = document.createElement("span");
+        badge.classList.toggle("yes", value);
+        badge.textContent = `${labelText}: ${value ? "yes" : "no"}`;
+        properties.append(badge);
       }
-      viSent = true;
-      setStatus('VI sent. Waiting for machine response.', true);
-      $('rxStatus').textContent = 'VI sent; waiting for notifications.';
-    } catch (e) {
-      setStatus(`Write failed: ${e.name || 'Error'}: ${e.message || e}`);
-    } finally {
-      $('send').disabled = !characteristic || !(characteristic.properties.write || characteristic.properties.writeWithoutResponse);
+      item.append(properties);
+      return item;
     }
-  }
-  function clearCapture() {
-    notifications = []; stream = []; completeFrames = []; sentAt = null; viSent = false;
-    $('rxStatus').textContent = characteristic ? 'Capture cleared; notifications remain enabled.' : 'Waiting for connection.';
-    render();
-  }
-  function exportJSON() {
-    const data = {
-      exportedAt:new Date().toISOString(),
-      purpose:'VI-only BLE diagnostic; no machine-operation commands sent',
-      device:device ? {name:device.name || null,id:device.id || null,connected:!!device.gatt?.connected} : null,
-      profile:{service: SERVICE, characteristic: CHARACTERISTIC},
-      request: {
-        command:'VI',
-        vendorId:'33333',
-        payloadHex:'33 33 33 33 33 54 54 49 01',
-        frameHex:'02 00 0B 56 49 33 33 33 33 33 54 54 49 01 6F 03',
-        sentAt
-      },
-      notifications,
-      combinedStreamHex:bytesToHex(stream),
-      completeFrames:completeFrames.map(f=>({at:f.at,hex:f.hex}))
-    };
-    const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href=url; a.download='kiosoft-vi-diagnostic.json'; a.click();
-    setTimeout(()=>URL.revokeObjectURL(url),1000);
-  }
-  $('connect').addEventListener('click',connect);
-  $('disconnect').addEventListener('click',()=>{if(device?.gatt?.connected)device.gatt.disconnect();});
-  $('send').addEventListener('click',sendVI);
-  $('clear').addEventListener('click',clearCapture);
-  $('export').addEventListener('click',exportJSON);
-  render();
-})();
-</script>
+
+    function makeNotice(message, isError = false) {
+      const p = document.createElement("p");
+      p.className = isError ? "error" : "muted";
+      p.textContent = message;
+      return p;
+    }
+
+    const supportStatus = document.querySelector("#support-status");
+    if (!window.isSecureContext) {
+      setMessage(supportStatus, "This page is not in a secure context. Serve it from localhost or HTTPS to use Web Bluetooth.", true);
+    } else if (!navigator.bluetooth) {
+      setMessage(supportStatus, "Web Bluetooth is not available here. Use a compatible Chromium browser and check browser/device Bluetooth support.", true);
+    } else {
+      setMessage(supportStatus, "Secure context and Web Bluetooth API detected. Availability still depends on browser, operating system, adapter, and permissions.");
+    }
+  </script>
 </body>
 </html>
