@@ -50,7 +50,7 @@
 <body>
   <main>
     <h1>Nn Bluetooth inspection</h1>
-    <p>This prototype discovers an Nn device, asks you to confirm its sticker number, connects, and lists accessible GATT services and characteristic properties. It can passively subscribe to FFE1 notifications and display the bytes pushed by the machine. It does not issue characteristic reads or writes, send application commands, authenticate, or control the machine.</p>
+    <p>This prototype discovers an Nn device, asks you to confirm its sticker number, connects, and lists accessible GATT services and characteristic properties. It can passively subscribe to FFE1 notifications and inspect legacy frames. A separate, deliberate one-shot button can send the service-request VI identification request. The page does not read characteristics, authenticate, or control the machine.</p>
 
     <section class="card" aria-labelledby="support-title">
       <h2 id="support-title">Browser requirements</h2>
@@ -90,14 +90,22 @@
         <p class="muted"><span id="capture-count">0</span> of 500 most recent notifications shown. Each browser notification event is kept as a separate entry.</p>
         <ol id="capture-log" class="capture-log" aria-live="polite"></ol>
         <h3>Passive legacy-protocol frame diagnostics</h3>
-        <p id="frame-status" class="status" role="status">No application-level commands are sent. Frame parsing starts when notification capture is active.</p>
+        <p id="frame-status" class="status" role="status">No request is sent automatically. Frame parsing starts when notification capture is active.</p>
         <p class="muted">Notifications are kept intact above. This separate log assembles bytes into candidate frames and validates the legacy STX/length/XOR/ETX format; it does not authenticate, decrypt, or interpret machine state.</p>
         <p class="muted"><span id="frame-count">0</span> of 500 most recent frames and diagnostics shown.</p>
         <ol id="frame-log" class="frame-log" aria-live="polite"></ol>
+        <h3>One-shot VI identification test</h3>
+        <p class="muted">Sends only the MyServiceRequest2Fragment VI identification frame after an explicit click. It does not start a wash cycle or send a follow-up command. A failed attempt remains locked for this connection; disconnect and reconnect to re-arm.</p>
+        <div class="row">
+          <button id="send-vi-button" type="button" disabled>Send VI identification request</button>
+        </div>
+        <p id="vi-status" class="status" role="status">Connect, discover writable FFE1, and start notification capture before sending VI.</p>
+        <h4>Outbound VI log</h4>
+        <ol id="vi-log" class="capture-log" aria-live="polite"></ol>
       </section>
     </section>
 
-    <p class="muted">GATT metadata describes what the device exposes. A listed write property is only reported; this page never uses it.</p>
+    <p class="muted">GATT metadata describes what the device exposes. A listed write property is used only by the explicit, one-shot VI identification test after notification capture is active.</p>
   </main>
 
   <script>
@@ -130,9 +138,14 @@
     const frameStatus = document.querySelector("#frame-status");
     const frameCount = document.querySelector("#frame-count");
     const frameLog = document.querySelector("#frame-log");
+    const sendViButton = document.querySelector("#send-vi-button");
+    const viStatus = document.querySelector("#vi-status");
+    const viLog = document.querySelector("#vi-log");
     const FFE1_CHARACTERISTIC = "0000ffe1-0000-1000-8000-00805f9b34fb";
+    const SERVICE_REQUEST_VENDOR_ID = "33333";
     const MAX_CAPTURE_ENTRIES = 500;
     const MAX_FRAME_LOG_ENTRIES = 500;
+    const MAX_VI_LOG_ENTRIES = 100;
     const MAX_FRAME_BODY_LENGTH = 4096;
     const MAX_RECEIVE_BUFFER_BYTES = 8192;
 
@@ -143,6 +156,8 @@
     let captureStarting = false;
     let captureStopping = false;
     let receiveBuffer = new Uint8Array(0);
+    let viAttempted = false;
+    let viSending = false;
 
     function setMessage(element, message, isError = false) {
       element.textContent = message;
@@ -154,7 +169,9 @@
       notificationPanel.hidden = !connected;
       const canNotify = Boolean(ffe1Characteristic?.properties.notify);
       startCaptureButton.disabled = !connected || !canNotify || captureActive || captureStarting || captureStopping;
-      stopCaptureButton.disabled = !connected || !captureActive || captureStopping;
+      stopCaptureButton.disabled = !connected || !captureActive || captureStopping || viSending;
+      const canWrite = Boolean(ffe1Characteristic?.properties.write || ffe1Characteristic?.properties.writeWithoutResponse);
+      sendViButton.disabled = !connected || ffe1Characteristic?.uuid?.toLowerCase() !== FFE1_CHARACTERISTIC || !canWrite || !captureActive || captureStarting || captureStopping || viAttempted || viSending;
     }
 
     function onFfe1Notification(event) {
@@ -291,7 +308,7 @@
 
         receiveBuffer = receiveBuffer.slice(expectedFrameLength);
       }
-      setMessage(frameStatus, `Assembler ready. ${receiveBuffer.length} unconsumed byte(s) buffered; passive only, no application-level commands sent.`);
+      setMessage(frameStatus, `Assembler ready. ${receiveBuffer.length} unconsumed byte(s) buffered; no further command is sent automatically.`);
     }
 
     function validateLegacyFrame(frame, declaredBodyLength) {
@@ -347,7 +364,7 @@
       });
 
       setMessage(frameStatus, overallValid
-        ? `Valid legacy-format frame decoded (${frame.length} bytes). Passive only; no application-level commands sent.`
+        ? `Valid legacy-format frame decoded (${frame.length} bytes). No follow-up command is sent automatically.`
         : `Invalid legacy-format candidate decoded (${frame.length} bytes); see validation details and resynchronization diagnostics.`, !overallValid);
     }
 
@@ -356,6 +373,150 @@
         recordAssemblerDiagnostic(`${reason}; discarded ${receiveBuffer.length} incomplete buffered byte(s)`, receiveBuffer);
         receiveBuffer = new Uint8Array(0);
       }
+    }
+
+    function asciiBytes(text) {
+      const bytes = [];
+      for (const character of text) {
+        const code = character.charCodeAt(0);
+        if (code > 0x7f) throw new Error("VI identification fields must be ASCII.");
+        bytes.push(code);
+      }
+      return new Uint8Array(bytes);
+    }
+
+    function buildServiceRequestViFrame() {
+      // Mirrors MyServiceRequest2Fragment.m19793K(): vendor bytes + "TTI" + 0x01.
+      const vendor = asciiBytes(SERVICE_REQUEST_VENDOR_ID);
+      const marker = asciiBytes("TTI");
+      const command = new Uint8Array([0x56, 0x49]); // ASCII "VI"
+      const payload = new Uint8Array(vendor.length + marker.length + 1);
+      payload.set(vendor, 0);
+      payload.set(marker, vendor.length);
+      payload[payload.length - 1] = 0x01;
+
+      const bodyLength = command.length + payload.length;
+      if (bodyLength > 0xffff) throw new Error("VI frame body is too large.");
+      const frame = new Uint8Array(bodyLength + 5);
+      frame[0] = 0x02;
+      frame[1] = (bodyLength >> 8) & 0xff;
+      frame[2] = bodyLength & 0xff;
+      frame.set(command, 3);
+      frame.set(payload, 5);
+
+      // EncryptionFilter.calculateLrc receives [length_hi, length_lo, command, payload].
+      let lrc = 0;
+      for (let index = 1; index < 3 + bodyLength; index += 1) lrc ^= frame[index];
+      frame[3 + bodyLength] = lrc;
+      frame[4 + bodyLength] = 0x03;
+      return { frame, payload, bodyLength };
+    }
+
+    function splitFrameIntoChunks(frame, maximumChunkBytes = 20) {
+      const chunks = [];
+      for (let offset = 0; offset < frame.length; offset += maximumChunkBytes) {
+        chunks.push({ offset, bytes: frame.slice(offset, Math.min(offset + maximumChunkBytes, frame.length)) });
+      }
+      return chunks;
+    }
+
+    function getAndroidCompatibleWriteMode(characteristic) {
+      // Android's BluetoothGattCharacteristic defaults to no-response when that property is present.
+      if (characteristic.properties.writeWithoutResponse) return "without response";
+      if (characteristic.properties.write) return "with response";
+      return null;
+    }
+
+    function writeChunk(characteristic, chunk, mode) {
+      const methodName = mode === "without response" ? "writeValueWithoutResponse" : "writeValueWithResponse";
+      const method = characteristic[methodName];
+      if (typeof method !== "function") {
+        throw new Error(`This browser does not expose ${methodName}() for FFE1.`);
+      }
+      return method.call(characteristic, chunk);
+    }
+
+    function appendViAttemptLog(frame, chunks, mode) {
+      const entry = document.createElement("li");
+      const time = document.createElement("time");
+      const startedAt = new Date();
+      time.dateTime = startedAt.toISOString();
+      time.textContent = startedAt.toLocaleString();
+      entry.append(time);
+
+      const frameLine = document.createElement("code");
+      frameLine.textContent = `Outbound VI frame (${frame.length} bytes): ${formatHex(frame)}`;
+      entry.append(frameLine);
+
+      const chunksLine = document.createElement("code");
+      chunksLine.textContent = `Chunk boundaries: ${chunks.map((chunk, index) => `${index + 1}/${chunks.length} [${chunk.offset}, ${chunk.offset + chunk.bytes.length}) = ${formatHex(chunk.bytes)}`).join(" | ")}`;
+      entry.append(chunksLine);
+
+      const resultElements = chunks.map((chunk, index) => {
+        const result = document.createElement("code");
+        result.textContent = `Chunk ${index + 1}/${chunks.length} (${mode}): pending`;
+        entry.append(result);
+        return result;
+      });
+
+      viLog.append(entry);
+      while (viLog.children.length > MAX_VI_LOG_ENTRIES) viLog.firstElementChild.remove();
+      return resultElements;
+    }
+
+    async function sendServiceRequestViOnce() {
+      if (viAttempted || viSending) return;
+      if (!selectedDevice?.gatt?.connected || !ffe1Characteristic || !captureActive) {
+        setMessage(viStatus, "VI is locked until connected FFE1 is discovered and notification capture is active.", true);
+        updateCaptureControls();
+        return;
+      }
+
+      const mode = getAndroidCompatibleWriteMode(ffe1Characteristic);
+      if (!mode) {
+        setMessage(viStatus, "FFE1 does not expose a supported write property.", true);
+        updateCaptureControls();
+        return;
+      }
+
+      let request;
+      try {
+        request = buildServiceRequestViFrame();
+      } catch (error) {
+        setMessage(viStatus, error?.message || "Could not build the VI frame.", true);
+        return;
+      }
+
+      const chunks = splitFrameIntoChunks(request.frame, 20);
+      viAttempted = true;
+      viSending = true;
+      const chunkResults = appendViAttemptLog(request.frame, chunks, mode);
+      updateCaptureControls();
+      setMessage(viStatus, `Sending one ${request.frame.length}-byte VI frame in ${chunks.length} chunk(s), ${mode}. No follow-up command will be sent.`);
+
+      let failed = false;
+      for (let index = 0; index < chunks.length; index += 1) {
+        const chunk = chunks[index];
+        const resultElement = chunkResults[index];
+        const attemptedAt = new Date().toLocaleString();
+        try {
+          await writeChunk(ffe1Characteristic, chunk.bytes, mode);
+          resultElement.textContent = `Chunk ${index + 1}/${chunks.length} at ${attemptedAt}: write promise resolved (${mode}).`;
+        } catch (error) {
+          failed = true;
+          resultElement.textContent = `Chunk ${index + 1}/${chunks.length} at ${attemptedAt}: write failed (${error?.message || "unknown error"}). No retry was attempted.`;
+          for (let remaining = index + 1; remaining < chunkResults.length; remaining += 1) {
+            chunkResults[remaining].textContent = `Chunk ${remaining + 1}/${chunks.length}: not sent because an earlier chunk failed.`;
+          }
+          break;
+        }
+      }
+
+      viSending = false;
+      updateCaptureControls();
+      setMessage(viStatus, failed
+        ? "VI attempt failed and remains locked for this connection. Inspect the outbound log; no retry or follow-up command was sent."
+        : `VI write completed and remains locked for this connection. ${mode === "without response" ? "A resolved write-without-response promise is not a peripheral acknowledgement." : "The write-with-response operation completed."} Wait for notifications; no GV/GI follow-up is automatic.` , failed);
     }
 
     function browserErrorMessage(error) {
@@ -389,6 +550,8 @@
 
     function handleDisconnect() {
       discardPendingReceiveBytes("disconnected");
+      viAttempted = false;
+      viSending = false;
       chooseButton.disabled = false;
       disconnectButton.disabled = true;
       connectButton.disabled = false;
@@ -423,6 +586,8 @@
         selectedDevice.addEventListener("gattserverdisconnected", handleDisconnect);
         ffe1Characteristic = null;
         discardPendingReceiveBytes("new device selected");
+        viAttempted = false;
+        viSending = false;
         updateCaptureControls();
         const name = device.name || "(advertised name unavailable)";
         const suffix = name.match(/(\d{3})$/);
@@ -460,6 +625,9 @@
       chooseButton.disabled = true;
       setMessage(connectionStatus, "Connecting…");
       try {
+        viAttempted = false;
+        viSending = false;
+        updateCaptureControls();
         const server = await selectedDevice.gatt.connect();
         disconnectButton.disabled = false;
         setMessage(connectionStatus, "Connected. Inspecting accessible GATT metadata…");
@@ -499,7 +667,7 @@
           return;
         }
         captureActive = true;
-        setMessage(captureStatus, "Notification capture is active. No application-level command was sent.");
+        setMessage(captureStatus, "Notification capture is active. VI is sent only by its separate explicit button.");
       } catch (error) {
         characteristic.removeEventListener("characteristicvaluechanged", onFfe1Notification);
         setMessage(captureStatus, `Could not start notifications: ${browserErrorMessage(error)}`, true);
@@ -508,6 +676,8 @@
         updateCaptureControls();
       }
     });
+
+    sendViButton.addEventListener("click", sendServiceRequestViOnce);
 
     stopCaptureButton.addEventListener("click", async () => {
       if (!captureActive || !ffe1Characteristic || !selectedDevice?.gatt?.connected) return;
@@ -535,8 +705,12 @@
       captureCount.textContent = "0";
       frameLog.replaceChildren();
       frameCount.textContent = "0";
+      viLog.replaceChildren();
       receiveBuffer = new Uint8Array(0);
-      setMessage(frameStatus, "Logs and incomplete frame buffer cleared. Capture remains passive; no application-level commands sent.");
+      setMessage(frameStatus, "Logs and incomplete frame buffer cleared. Capture remains passive.");
+      setMessage(viStatus, viAttempted
+        ? "Logs cleared. VI remains locked for this connection; disconnect and reconnect to re-arm."
+        : "Logs cleared. VI remains available only while connected and capturing notifications.");
     });
 
     disconnectButton.addEventListener("click", () => {
