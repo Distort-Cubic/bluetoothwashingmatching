@@ -39,6 +39,10 @@
     .capture-log { max-height: 24rem; overflow: auto; padding-left: 2.25rem; }
     .capture-log li { padding: 8px 0; border-top: 1px solid var(--border); }
     .capture-log code { display: block; white-space: pre-wrap; word-break: break-all; }
+    .frame-log { max-height: 28rem; overflow: auto; padding-left: 2.25rem; }
+    .frame-log li { padding: 8px 0; border-top: 1px solid var(--border); }
+    .frame-log code { display: block; white-space: pre-wrap; word-break: break-all; }
+    .validation { display: block; }
     code { overflow-wrap: anywhere; }
     @media (max-width: 560px) { body { padding: 16px; } }
   </style>
@@ -81,10 +85,15 @@
         <div class="row">
           <button id="start-capture-button" type="button" disabled>Start notification capture</button>
           <button id="stop-capture-button" type="button" disabled>Stop notifications</button>
-          <button id="clear-capture-button" type="button">Clear log</button>
+          <button id="clear-capture-button" type="button">Clear logs</button>
         </div>
         <p class="muted"><span id="capture-count">0</span> of 500 most recent notifications shown. Each browser notification event is kept as a separate entry.</p>
         <ol id="capture-log" class="capture-log" aria-live="polite"></ol>
+        <h3>Passive legacy-protocol frame diagnostics</h3>
+        <p id="frame-status" class="status" role="status">No application-level commands are sent. Frame parsing starts when notification capture is active.</p>
+        <p class="muted">Notifications are kept intact above. This separate log assembles bytes into candidate frames and validates the legacy STX/length/XOR/ETX format; it does not authenticate, decrypt, or interpret machine state.</p>
+        <p class="muted"><span id="frame-count">0</span> of 500 most recent frames and diagnostics shown.</p>
+        <ol id="frame-log" class="frame-log" aria-live="polite"></ol>
       </section>
     </section>
 
@@ -118,8 +127,14 @@
     const clearCaptureButton = document.querySelector("#clear-capture-button");
     const captureCount = document.querySelector("#capture-count");
     const captureLog = document.querySelector("#capture-log");
+    const frameStatus = document.querySelector("#frame-status");
+    const frameCount = document.querySelector("#frame-count");
+    const frameLog = document.querySelector("#frame-log");
     const FFE1_CHARACTERISTIC = "0000ffe1-0000-1000-8000-00805f9b34fb";
     const MAX_CAPTURE_ENTRIES = 500;
+    const MAX_FRAME_LOG_ENTRIES = 500;
+    const MAX_FRAME_BODY_LENGTH = 4096;
+    const MAX_RECEIVE_BUFFER_BYTES = 8192;
 
     let selectedDevice = null;
     let selectedSuffixNumber = null;
@@ -127,6 +142,7 @@
     let captureActive = false;
     let captureStarting = false;
     let captureStopping = false;
+    let receiveBuffer = new Uint8Array(0);
 
     function setMessage(element, message, isError = false) {
       element.textContent = message;
@@ -161,6 +177,185 @@
         captureLog.firstElementChild.remove();
       }
       captureCount.textContent = String(captureLog.children.length);
+
+      // Keep the raw event above intact; pass a copy of the same bytes to the assembler.
+      appendNotificationBytes(bytes);
+    }
+
+    function formatHex(bytes) {
+      return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+    }
+
+    function appendFrameLogEntry(contentBuilder) {
+      const entry = document.createElement("li");
+      const time = document.createElement("time");
+      const receivedAt = new Date();
+      time.dateTime = receivedAt.toISOString();
+      time.textContent = receivedAt.toLocaleString();
+      entry.append(time);
+      contentBuilder(entry);
+      frameLog.append(entry);
+      while (frameLog.children.length > MAX_FRAME_LOG_ENTRIES) {
+        frameLog.firstElementChild.remove();
+      }
+      frameCount.textContent = String(frameLog.children.length);
+    }
+
+    function recordAssemblerDiagnostic(message, bytes = new Uint8Array(0)) {
+      appendFrameLogEntry((entry) => {
+        const summary = document.createElement("span");
+        summary.className = "validation";
+        summary.textContent = ` — ASSEMBLER: ${message}`;
+        entry.append(summary);
+        if (bytes.length > 0) {
+          const raw = document.createElement("code");
+          raw.textContent = formatHex(bytes);
+          entry.append(raw);
+        }
+      });
+    }
+
+    function appendNotificationBytes(incomingBytes) {
+      if (incomingBytes.length === 0) return;
+      let combined = new Uint8Array(receiveBuffer.length + incomingBytes.length);
+      combined.set(receiveBuffer, 0);
+      combined.set(incomingBytes, receiveBuffer.length);
+
+      if (combined.length > MAX_RECEIVE_BUFFER_BYTES) {
+        const discardedCount = combined.length - MAX_RECEIVE_BUFFER_BYTES;
+        const discarded = combined.slice(0, discardedCount);
+        combined = combined.slice(discardedCount);
+        recordAssemblerDiagnostic(`receive buffer limit (${MAX_RECEIVE_BUFFER_BYTES} bytes) exceeded; discarded ${discardedCount} oldest byte(s) before parsing`, discarded);
+      }
+
+      receiveBuffer = combined;
+      extractCompleteFrames();
+    }
+
+    function findStartByte(bytes, fromIndex = 0) {
+      for (let index = fromIndex; index < bytes.length; index += 1) {
+        if (bytes[index] === 0x02) return index;
+      }
+      return -1;
+    }
+
+    function discardReceivePrefix(count, reason) {
+      if (count <= 0) return;
+      const dropped = receiveBuffer.slice(0, count);
+      receiveBuffer = receiveBuffer.slice(count);
+      recordAssemblerDiagnostic(`${reason}; discarded ${count} byte(s) while resynchronizing`, dropped);
+    }
+
+    function extractCompleteFrames() {
+      while (receiveBuffer.length > 0) {
+        const startIndex = findStartByte(receiveBuffer);
+        if (startIndex < 0) {
+          discardReceivePrefix(receiveBuffer.length, "no STX (0x02) found");
+          break;
+        }
+        if (startIndex > 0) {
+          discardReceivePrefix(startIndex, "bytes before the next STX (0x02)");
+          continue;
+        }
+
+        if (receiveBuffer.length < 3) {
+          setMessage(frameStatus, `Incomplete frame header: buffered ${receiveBuffer.length} byte(s); waiting for ${3 - receiveBuffer.length} more.`);
+          recordAssemblerDiagnostic(`incomplete frame header retained (${receiveBuffer.length}/3 bytes)`, receiveBuffer);
+          return;
+        }
+
+        const bodyLength = (receiveBuffer[1] << 8) | receiveBuffer[2];
+        if (bodyLength < 2 || bodyLength > MAX_FRAME_BODY_LENGTH) {
+          recordAssemblerDiagnostic(`invalid declared body length ${bodyLength}; accepted range is 2–${MAX_FRAME_BODY_LENGTH}`, receiveBuffer.slice(0, 3));
+          discardReceivePrefix(1, "invalid frame length");
+          continue;
+        }
+
+        const expectedFrameLength = bodyLength + 5;
+        if (receiveBuffer.length < expectedFrameLength) {
+          const waitingFor = expectedFrameLength - receiveBuffer.length;
+          setMessage(frameStatus, `Incomplete frame retained: ${receiveBuffer.length}/${expectedFrameLength} bytes; waiting for ${waitingFor} more.`);
+          recordAssemblerDiagnostic(`incomplete frame retained (${receiveBuffer.length}/${expectedFrameLength} bytes; body length ${bodyLength})`, receiveBuffer);
+          return;
+        }
+
+        const candidate = receiveBuffer.slice(0, expectedFrameLength);
+        const validation = validateLegacyFrame(candidate, bodyLength);
+        renderDecodedFrame(candidate, bodyLength, validation);
+
+        if (!validation.etxValid) {
+          // The declared boundary has a bad terminator, so retain later bytes for a fresh STX search.
+          discardReceivePrefix(1, "invalid ETX at the declared frame boundary");
+          continue;
+        }
+
+        receiveBuffer = receiveBuffer.slice(expectedFrameLength);
+      }
+      setMessage(frameStatus, `Assembler ready. ${receiveBuffer.length} unconsumed byte(s) buffered; passive only, no application-level commands sent.`);
+    }
+
+    function validateLegacyFrame(frame, declaredBodyLength) {
+      const checksumIndex = 3 + declaredBodyLength;
+      const etxIndex = 4 + declaredBodyLength;
+      let calculatedLrc = 0;
+      // Android EncryptionFilter builds [length_hi, length_lo, command, payload] for calculateLrc().
+      // XOR the frame bytes from offset 1 through the byte immediately before the checksum.
+      for (let index = 1; index < checksumIndex; index += 1) {
+        calculatedLrc ^= frame[index];
+      }
+      const expectedLength = declaredBodyLength + 5;
+      return {
+        stxValid: frame[0] === 0x02,
+        lengthValid: frame.length === expectedLength && frame.length - 5 === declaredBodyLength,
+        etxValid: etxIndex < frame.length && frame[etxIndex] === 0x03,
+        lrcValid: checksumIndex < frame.length && frame[checksumIndex] === calculatedLrc,
+        calculatedLrc,
+        expectedLength,
+        checksumIndex,
+        etxIndex
+      };
+    }
+
+    function asciiForBytes(bytes) {
+      return Array.from(bytes, (byte) => byte >= 0x20 && byte <= 0x7e ? String.fromCharCode(byte) : ".").join("");
+    }
+
+    function renderDecodedFrame(frame, declaredBodyLength, validation) {
+      const command = frame.slice(3, 5);
+      const statusPresent = declaredBodyLength >= 3;
+      const status = statusPresent ? frame[5] : null;
+      const payloadStart = statusPresent ? 6 : 5;
+      const payloadEnd = 3 + declaredBodyLength;
+      const payload = frame.slice(payloadStart, Math.max(payloadStart, payloadEnd));
+      const overallValid = validation.stxValid && validation.lengthValid && validation.etxValid && validation.lrcValid;
+
+      appendFrameLogEntry((entry) => {
+        const heading = document.createElement("span");
+        heading.className = "validation";
+        heading.textContent = ` — FRAME ${overallValid ? "VALID" : "INVALID"}; ${frame.length} total byte(s); declared body ${declaredBodyLength}`;
+        entry.append(heading);
+
+        const details = document.createElement("code");
+        details.textContent = [
+          `Command: ${formatHex(command)} (ASCII "${asciiForBytes(command)}")`,
+          `Status: ${statusPresent ? `0x${status.toString(16).padStart(2, "0").toUpperCase()}` : "not present"}`,
+          `Payload: ${formatHex(payload) || "(empty)"}`,
+          `Checks: STX ${validation.stxValid ? "valid" : "INVALID"}; length ${validation.lengthValid ? "valid" : "INVALID"} (expected ${validation.expectedLength}, got ${frame.length}); ETX ${validation.etxValid ? "valid" : "INVALID"}; XOR/LRC ${validation.lrcValid ? "valid" : "INVALID"} (calculated 0x${validation.calculatedLrc.toString(16).padStart(2, "0").toUpperCase()})`,
+          `Frame: ${formatHex(frame)}`
+        ].join("\n");
+        entry.append(details);
+      });
+
+      setMessage(frameStatus, overallValid
+        ? `Valid legacy-format frame decoded (${frame.length} bytes). Passive only; no application-level commands sent.`
+        : `Invalid legacy-format candidate decoded (${frame.length} bytes); see validation details and resynchronization diagnostics.`, !overallValid);
+    }
+
+    function discardPendingReceiveBytes(reason) {
+      if (receiveBuffer.length > 0) {
+        recordAssemblerDiagnostic(`${reason}; discarded ${receiveBuffer.length} incomplete buffered byte(s)`, receiveBuffer);
+        receiveBuffer = new Uint8Array(0);
+      }
     }
 
     function browserErrorMessage(error) {
@@ -193,6 +388,7 @@
     }
 
     function handleDisconnect() {
+      discardPendingReceiveBytes("disconnected");
       chooseButton.disabled = false;
       disconnectButton.disabled = true;
       connectButton.disabled = false;
@@ -226,6 +422,7 @@
         selectedDevice = device;
         selectedDevice.addEventListener("gattserverdisconnected", handleDisconnect);
         ffe1Characteristic = null;
+        discardPendingReceiveBytes("new device selected");
         updateCaptureControls();
         const name = device.name || "(advertised name unavailable)";
         const suffix = name.match(/(\d{3})$/);
@@ -290,6 +487,7 @@
         return;
       }
       const characteristic = ffe1Characteristic;
+      discardPendingReceiveBytes("new notification capture session started");
       captureStarting = true;
       updateCaptureControls();
       characteristic.addEventListener("characteristicvaluechanged", onFfe1Notification);
@@ -320,6 +518,7 @@
         await characteristic.stopNotifications();
         characteristic.removeEventListener("characteristicvaluechanged", onFfe1Notification);
         captureActive = false;
+        discardPendingReceiveBytes("notification capture stopped");
         setMessage(captureStatus, "Notification subscription stopped. Captured entries remain until cleared.");
       } catch (error) {
         if (selectedDevice?.gatt?.connected && ffe1Characteristic === characteristic) {
@@ -334,6 +533,10 @@
     clearCaptureButton.addEventListener("click", () => {
       captureLog.replaceChildren();
       captureCount.textContent = "0";
+      frameLog.replaceChildren();
+      frameCount.textContent = "0";
+      receiveBuffer = new Uint8Array(0);
+      setMessage(frameStatus, "Logs and incomplete frame buffer cleared. Capture remains passive; no application-level commands sent.");
     });
 
     disconnectButton.addEventListener("click", () => {
