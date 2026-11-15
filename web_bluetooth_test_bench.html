@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Web Bluetooth Test Bench</title>
+<style>
+:root{color-scheme:dark;--bg:#10151d;--panel:#192230;--line:#2b394b;--text:#e8eef6;--muted:#9eacbd;--accent:#65b7ff;--good:#62d49b;--bad:#ff8585}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui, sans-serif}
+main{max-width:1100px;margin:auto;padding:24px}h1{font-size:25px;margin:0 0 5px}h2{font-size:17px;margin:0 0 14px}
+p,.muted{color:var(--muted)}.sub{margin:0 0 22px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:14px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:17px;margin-bottom:14px}
+label{display:block;color:var(--muted);font-size:13px;margin:10px 0 5px}
+input,textarea,select{width:100%;padding:10px;border-radius:7px;border:1px solid var(--line);background:#0f1722;color:var(--text);font:inherit}
+textarea{min-height:90px;resize:vertical}button{border:1px solid #42617e;background:#203b54;color:#eef7ff;border-radius:7px;padding:9px 12px;font:inherit;cursor:pointer;margin:5px 5px 0 0}
+button:hover{background:#2a5275}button:disabled{opacity:.4;cursor:not-allowed}.primary{background:#145b91}.danger{background:#552c35;border-color:#81434e}
+.row{display:flex;flex-wrap:wrap;gap:5px;align-items:center}.status{padding:9px 11px;background:#101923;border-radius:7px;color:var(--muted);margin:10px 0}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0c121a;border:1px solid var(--line);padding:12px;border-radius:8px;max-height:300px;overflow:auto;font-size:12px}
+#log{height:260px;overflow:auto}.pill{display:inline-block;padding:2px 8px;border-radius:20px;background:#25384a;color:#b9dfff;font-size:12px}
+small{color:var(--muted)}.check{display:flex;align-items:center;gap:8px}.check input{width:auto}
+</style>
+</head>
+<body>
+<main>
+<h1>Web Bluetooth Test Bench</h1>
+<p class="sub">Device discovery · LE advertisements · GATT services · characteristics · descriptors · notifications</p>
+<div class="status" id="status">Ready. Check browser support and connect a Bluetooth device.</div>
+
+<div class="grid">
+<section>
+<h2>1. Device discovery</h2>
+<label>Service UUID filters (comma-separated; optional)</label>
+<input id="filters" placeholder="e.g. battery_service, 180F">
+<label>Optional services to access after connection</label>
+<input id="optional" placeholder="e.g. device_information, 180A">
+<label>Name prefix (optional)</label>
+<input id="prefix" placeholder="e.g. Polar">
+<label class="check"><input type="checkbox" id="allDevices"> Accept all devices (ignore service/name filters)</label>
+<div class="row">
+<button class="primary" id="request">Request device</button>
+<button id="reconnect" disabled>Connect selected</button>
+<button class="danger" id="disconnect" disabled>Disconnect</button>
+</div>
+<small>Device chooser requires a user gesture. Filters and acceptAllDevices cannot be used together.</small>
+</section>
+
+<section>
+<h2>2. Advertisement scanning</h2>
+<p class="muted">Experimental API where supported. This is separate from the device chooser.</p>
+<label>Scan service UUIDs (optional)</label>
+<input id="scanServices" placeholder="e.g. 180F">
+<label class="check"><input type="checkbox" id="scanAcceptAll" checked> Accept all advertisements</label>
+<div class="row">
+<button class="primary" id="scanStart">Start LE scan</button>
+<button id="scanStop" disabled>Stop scan</button>
+</div>
+<pre id="advertisements">No advertisements received.</pre>
+</section>
+</div>
+
+<section>
+<h2>3. Selected device and GATT server</h2>
+<div id="deviceInfo" class="muted">No device selected.</div>
+<div class="row">
+<button id="connect" disabled class="primary">Connect GATT</button>
+<button id="getServices" disabled>Get primary services</button>
+</div>
+<label>Service UUID</label>
+<select id="serviceSelect"><option value="">Select a service</option></select>
+<div class="row">
+<button id="getCharacteristics" disabled>Get characteristics</button>
+<button id="getIncluded" disabled>Get included services</button>
+</div>
+<label>Characteristic</label>
+<select id="charSelect"><option value="">Select a characteristic</option></select>
+<div class="row">
+<button id="read" disabled>Read value</button>
+<button id="startNotify" disabled>Start notifications</button>
+<button id="stopNotify" disabled>Stop notifications</button>
+<button id="getDescriptors" disabled>Get descriptors</button>
+</div>
+<label>Characteristic value (UTF-8 text or hex bytes)</label>
+<textarea id="writeValue" placeholder="Text: hello&#10;Hex: 48 65 6c 6c 6f"></textarea>
+<label class="check"><input type="checkbox" id="hexMode"> Interpret input as hexadecimal bytes</label>
+<div class="row">
+<button id="write" disabled>Write (with response)</button>
+<button id="writeNoResponse" disabled>Write (without response)</button>
+</div>
+<label>Characteristic / read result</label>
+<pre id="valueOutput">No value.</pre>
+</section>
+
+<section>
+<h2>4. Descriptors</h2>
+<label>Descriptor</label>
+<select id="descriptorSelect"><option value="">Select a descriptor</option></select>
+<div class="row">
+<button id="readDescriptor" disabled>Read descriptor</button>
+<button id="writeDescriptor" disabled>Write descriptor</button>
+</div>
+<pre id="descriptorOutput">No descriptor value.</pre>
+</section>
+
+<section>
+<h2>5. Service and characteristic details</h2>
+<pre id="details">No GATT details yet.</pre>
+</section>
+
+<section>
+<h2>6. Event log</h2>
+<div class="row"><button id="clearLog">Clear log</button><button id="exportLog">Download log</button></div>
+<pre id="log" aria-live="polite"></pre>
+</section>
+<p><small>Security: this page only accesses devices after browser permission. Avoid writing arbitrary values to unknown characteristics; device firmware may interpret writes as commands.</small></p>
+</main>
+<script>
+(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+let device = null, server = null, service = null, characteristic = null, descriptor = null;
+let scan = null, logLines = [];
+const buttons = ['connect','getServices','getCharacteristics','getIncluded','read','startNotify','stopNotify','getDescriptors','write','writeNoResponse','readDescriptor','writeDescriptor'];
+function log(message, data) {
+  const line = `[${new Date().toLocaleTimeString()}] ${message}` + (data === undefined ? '' : '\n' + (typeof data === 'string' ? data : JSON.stringify(data,null,2)));
+  logLines.push(line); $('log').textContent = logLines.join('\n\n'); $('log').scrollTop = $('log').scrollHeight;
+}
+function status(s){$('status').textContent=s;log(s)}
+function enable(id, yes=true){$(id).disabled=!yes}
+function uuid(id){return id.trim()}
+function parseList(value){return value.split(',').map(x=>x.trim()).filter(Boolean)}
+function bytesToHex(bytes){return [...bytes].map(x=>x.toString(16).padStart(2,'0')).join(' ')}
+function decodeValue(value){
+  const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  let text;
+  try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes)}catch{text='(not valid UTF-8)'}
+  return `Byte length: ${bytes.length}\nHex: ${bytesToHex(bytes)}\nUTF-8: ${text}`;
+}
+function inputBytes(){
+  const s=$('writeValue').value;
+  if($('hexMode').checked){
+    const clean=s.replace(/0x/gi,'').replace(/[\s,:;-]/g,'');
+    if(clean.length%2 || !/^[0-9a-f]*$/i.test(clean)) throw Error('Invalid hex input. Use pairs of hexadecimal digits.');
+    return Uint8Array.from(clean.match(/.{2}/g)||[],x=>parseInt(x,16));
+  }
+  return new TextEncoder().encode(s);
+}
+function refreshControls(){
+  enable('connect',!!device && !server?.connected);
+  enable('reconnect',!!device && !server?.connected);
+  enable('disconnect',!!device?.gatt?.connected);
+  enable('getServices',!!server?.connected);
+  enable('getCharacteristics',!!service);
+  enable('getIncluded',!!service);
+  enable('read',!!characteristic?.properties.read);
+  enable('startNotify',!!characteristic?.properties.notify || !!characteristic?.properties.indicate);
+  enable('stopNotify',!!characteristic);
+  enable('getDescriptors',!!characteristic);
+  enable('write',!!characteristic?.properties.write);
+  enable('writeNoResponse',!!characteristic?.properties.writeWithoutResponse);
+  enable('readDescriptor',!!descriptor);
+  enable('writeDescriptor',!!descriptor);
+}
+function renderProperties(c){
+  const p=c.properties;
+  return {uuid:c.uuid, properties:{broadcast:p.broadcast,read:p.read,writeWithoutResponse:p.writeWithoutResponse,write:p.write,notify:p.notify,indicate:p.indicate,authenticatedSignedWrites:p.authenticatedSignedWrites,reliableWrite:p.reliableWrite,writableAuxiliaries:p.writableAuxiliaries}};
+}
+function onDisconnect(){
+  server=null;service=null;characteristic=null;descriptor=null;
+  $('serviceSelect').innerHTML='<option value="">Select a service</option>';
+  $('charSelect').innerHTML='<option value="">Select a characteristic</option>';
+  $('descriptorSelect').innerHTML='<option value="">Select a descriptor</option>';
+  refreshControls();status('GATT disconnected.');
+}
+if(!('bluetooth' in navigator)) {
+  status('Web Bluetooth is not available in this browser or context. Use a supported Chromium browser over HTTPS or localhost.');
+} else {
+  log('Web Bluetooth API detected.');
+}
+$('request').onclick=async()=>{
+  try{
+    const filters=parseList($('filters').value), optionalServices=parseList($('optional').value);
+    const options={optionalServices};
+    if($('allDevices').checked) options.acceptAllDevices=true;
+    else {
+      if(filters.length) options.filters=[{services:filters}];
+      if($('prefix').value.trim()) (options.filters??=[]).push({namePrefix:$('prefix').value.trim()});
+      if(!options.filters?.length) throw Error('Enter a service UUID or name prefix, or select Accept all devices.');
+    }
+    device=await navigator.bluetooth.requestDevice(options);
+    device.addEventListener('gattserverdisconnected',onDisconnect);
+    $('deviceInfo').textContent=`Name: ${device.name||'(unknown)'}\nID: ${device.id}`;
+    status(`Selected device: ${device.name||device.id}`);
+    refreshControls();
+  }catch(e){status(`Device request failed: ${e.name}: ${e.message}`)}
+};
+async function connect(){
+  if(!device) throw Error('Select a device first.');
+  server=await device.gatt.connect();
+  status(`Connected to ${device.name||device.id}`);
+  refreshControls();
+}
+$('connect').onclick=async()=>{try{await connect()}catch(e){status(`Connect failed: ${e.message}`)}};
+$('reconnect').onclick=$('connect').onclick;
+$('disconnect').onclick=()=>{if(device?.gatt?.connected)device.gatt.disconnect();};
+$('getServices').onclick=async()=>{
+  try{
+    const services=await server.getPrimaryServices();
+    $('serviceSelect').innerHTML='<option value="">Select a service</option>';
+    services.forEach((s,i)=>{const o=document.createElement('option');o.value=String(i);o.textContent=s.uuid;$('serviceSelect').append(o)});
+    window._services=services;
+    $('details').textContent=JSON.stringify(services.map(s=>({uuid:s.uuid,isPrimary:s.isPrimary})),null,2);
+    status(`Found ${services.length} primary service(s).`);
+  }catch(e){status(`Service discovery failed: ${e.message}`)}
+};
+$('serviceSelect').onchange=()=>{
+  service=window._services?.[Number($('serviceSelect').value)]||null;
+  characteristic=null;descriptor=null;
+  $('charSelect').innerHTML='<option value="">Select a characteristic</option>';
+  $('descriptorSelect').innerHTML='<option value="">Select a descriptor</option>';
+  refreshControls();
+};
+$('getCharacteristics').onclick=async()=>{
+  try{
+    const chars=await service.getCharacteristics();window._chars=chars;
+    $('charSelect').innerHTML='<option value="">Select a characteristic</option>';
+    chars.forEach((c,i)=>{const o=document.createElement('option');o.value=String(i);o.textContent=c.uuid;$('charSelect').append(o)});
+    $('details').textContent=JSON.stringify(chars.map(renderProperties),null,2);
+    status(`Found ${chars.length} characteristic(s).`);
+  }catch(e){status(`Characteristic discovery failed: ${e.message}`)}
+};
+$('charSelect').onchange=()=>{
+  characteristic=window._chars?.[Number($('charSelect').value)]||null;descriptor=null;
+  $('descriptorSelect').innerHTML='<option value="">Select a descriptor</option>';
+  $('details').textContent=characteristic?JSON.stringify(renderProperties(characteristic),null,2):'No characteristic selected.';
+  refreshControls();
+};
+$('getIncluded').onclick=async()=>{
+  try{const list=await service.getIncludedServices();$('details').textContent=JSON.stringify(list.map(s=>s.uuid),null,2);status(`Found ${list.length} included service(s).`)}
+  catch(e){status(`Included service lookup failed: ${e.message}`)}
+};
+$('read').onclick=async()=>{
+  try{const v=await characteristic.readValue();$('valueOutput').textContent=decodeValue(v);status('Characteristic read completed.')}
+  catch(e){status(`Read failed: ${e.message}`)}
+};
+$('write').onclick=async()=>{
+  try{const b=inputBytes();await characteristic.writeValueWithResponse(b);status(`Wrote ${b.length} byte(s) with response.`)}
+  catch(e){status(`Write failed: ${e.message}`)}
+};
+$('writeNoResponse').onclick=async()=>{
+  try{const b=inputBytes();await characteristic.writeValueWithoutResponse(b);status(`Wrote ${b.length} byte(s) without response.`)}
+  catch(e){status(`Write failed: ${e.message}`)}
+};
+$('startNotify').onclick=async()=>{
+  try{
+    await characteristic.startNotifications();
+    characteristic.addEventListener('characteristicvaluechanged',ev=>{
+      const output=decodeValue(ev.target.value);$('valueOutput').textContent=output;log('Notification received',output);
+    });
+    status('Notifications enabled.');
+  }catch(e){status(`Start notifications failed: ${e.message}`)}
+};
+$('stopNotify').onclick=async()=>{
+  try{await characteristic.stopNotifications();status('Notifications stopped.')}
+  catch(e){status(`Stop notifications failed: ${e.message}`)}
+};
+$('getDescriptors').onclick=async()=>{
+  try{
+    const ds=await characteristic.getDescriptors();window._descriptors=ds;
+    $('descriptorSelect').innerHTML='<option value="">Select a descriptor</option>';
+    ds.forEach((d,i)=>{const o=document.createElement('option');o.value=String(i);o.textContent=d.uuid;$('descriptorSelect').append(o)});
+    status(`Found ${ds.length} descriptor(s).`);
+  }catch(e){status(`Descriptor discovery failed: ${e.message}`)}
+};
+$('descriptorSelect').onchange=()=>{descriptor=window._descriptors?.[Number($('descriptorSelect').value)]||null;refreshControls()};
+$('readDescriptor').onclick=async()=>{
+  try{const v=await descriptor.readValue();$('descriptorOutput').textContent=decodeValue(v);status('Descriptor read completed.')}
+  catch(e){status(`Descriptor read failed: ${e.message}`)}
+};
+$('writeDescriptor').onclick=async()=>{
+  try{const b=inputBytes();await descriptor.writeValue(b);status(`Descriptor write completed (${b.length} bytes).`)}
+  catch(e){status(`Descriptor write failed: ${e.message}`)}
+};
+$('scanStart').onclick=async()=>{
+  try{
+    if(!('bluetooth' in navigator) || !navigator.bluetooth.requestLEScan) throw Error('requestLEScan is not supported in this browser. It may require an experimental flag or a different browser build.');
+    const services=parseList($('scanServices').value);
+    const opts={keepRepeatedDevices:true};
+    if($('scanAcceptAll').checked)opts.acceptAllAdvertisements=true;
+    else if(services.length)opts.filters=[{services}];
+    else throw Error('Select accept all advertisements or enter at least one service UUID.');
+    scan=await navigator.bluetooth.requestLEScan(opts);
+    navigator.bluetooth.addEventListener('advertisementreceived',onAdvertisement);
+    enable('scanStart',false);enable('scanStop',true);
+    status('LE advertisement scan started.');
+  }catch(e){status(`Scan could not start: ${e.name}: ${e.message}`)}
+};
+function onAdvertisement(e){
+  const item={name:e.device.name||e.name||null,id:e.device.id,rssi:e.rssi,txPower:e.txPower,uuids:e.uuids,manufacturerData:[],serviceData:[]};
+  if(e.manufacturerData)for(const [k,v] of e.manufacturerData)item.manufacturerData.push({companyId:k,hex:bytesToHex(new Uint8Array(v.buffer,v.byteOffset,v.byteLength))});
+  if(e.serviceData)for(const [k,v] of e.serviceData)item.serviceData.push({uuid:k,hex:bytesToHex(new Uint8Array(v.buffer,v.byteOffset,v.byteLength))});
+  $('advertisements').textContent=JSON.stringify(item,null,2)+'\n\n'+$('advertisements').textContent;
+  log('Advertisement received',item);
+}
+$('scanStop').onclick=()=>{
+  try{if(scan)scan.stop();navigator.bluetooth.removeEventListener('advertisementreceived',onAdvertisement);scan=null;enable('scanStart',true);enable('scanStop',false);status('LE scan stopped.')}
+  catch(e){status(`Stop scan failed: ${e.message}`)}
+};
+$('clearLog').onclick=()=>{logLines=[];$('log').textContent=''};
+$('exportLog').onclick=()=>{
+  const blob=new Blob([logLines.join('\n\n')],{type:'text/plain'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='web-bluetooth-log.txt';a.click();URL.revokeObjectURL(a.href);
+};
+refreshControls();
+})();
+</script>
+</body>
+</html>
