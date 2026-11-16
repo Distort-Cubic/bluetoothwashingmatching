@@ -50,7 +50,7 @@
 <body>
   <main>
     <h1>Nn Bluetooth inspection</h1>
-    <p>This prototype discovers an Nn device, asks you to confirm its sticker number, connects, and lists accessible GATT services and characteristic properties. It can passively subscribe to FFE1 notifications and inspect legacy frames. It contains three separate, response-gated service-request identification actions (VI, GV, and GI), but currently keeps protocol writes disabled because the Android source does not reveal the effective GATT write type. The page does not read characteristics, authenticate, or control the machine.</p>
+    <p>This prototype discovers an Nn device, asks you to confirm its sticker number, connects, and lists accessible GATT services and characteristic properties. It can passively subscribe to FFE1 notifications and inspect legacy frames. It has three separate, response-gated service-request identification actions (VI, GV, and GI); each requires a manually selected Web Bluetooth write mode because Android's effective mode is not explicit in the decompiled source. The page does not read characteristics, authenticate, or control the machine.</p>
 
     <section class="card" aria-labelledby="support-title">
       <h2 id="support-title">Browser requirements</h2>
@@ -95,20 +95,29 @@
         <p class="muted"><span id="frame-count">0</span> of 500 most recent frames and diagnostics shown.</p>
         <ol id="frame-log" class="frame-log" aria-live="polite"></ol>
         <h3>Manual Nn identification sequence</h3>
-        <p class="muted">Each MyServiceRequest2Fragment identification command requires its own explicit click. A later button unlocks only after the preceding response is frame-valid, has the matching command ID, and has success status 00. Responses must begin after that command's recorded request time in the current connection session. Android source does not explicitly set its characteristic write type, so this page currently blocks protocol writes until the Android write mode is verified. No command starts a wash cycle.</p>
+        <p class="muted">Each MyServiceRequest2Fragment identification command requires its own explicit click. A later button unlocks only after the preceding response is frame-valid, has the matching command ID, and has success status 00. Responses must begin after that command's recorded request time in the current connection session. Android source does not explicitly set its characteristic write type; the selection below is your Web Bluetooth test choice and is not verified as Android's actual mode. No command starts a wash cycle.</p>
+        <div class="row">
+          <label for="write-mode-select">Web Bluetooth write mode for this test</label>
+          <select id="write-mode-select" disabled>
+            <option value="">Choose explicitly</option>
+            <option value="with response">Write with response</option>
+            <option value="without response">Write without response</option>
+          </select>
+        </div>
+        <p id="write-mode-status" class="status" role="status">Connect, discover FFE1, and choose a supported write mode. Android's effective mode remains unverified.</p>
         <div class="row">
           <button id="send-vi-button" type="button" disabled>Send VI identification request</button>
           <button id="send-gv-button" type="button" disabled>Send GV machine information request</button>
           <button id="send-gi-button" type="button" disabled>Send GI machine type request</button>
         </div>
-        <p id="vi-status" class="status" role="status">Android's explicit FFE1 write mode is unresolved; protocol writes are disabled pending source/runtime evidence.</p>
+        <p id="vi-status" class="status" role="status">Connect, discover writable FFE1, choose a Web Bluetooth write mode, and start notification capture before sending VI.</p>
         <p id="sequence-status" class="status" role="status">Sequence locked. Send VI manually; wait for a valid successful VI response before GV unlocks.</p>
         <h4>Outbound identification request log</h4>
         <ol id="vi-log" class="capture-log" aria-live="polite"></ol>
       </section>
     </section>
 
-    <p class="muted">GATT metadata describes what the device exposes. Advertised write properties are not used to guess Android's write mode; the VI, GV, and GI protocol actions remain locked until that mode is established.</p>
+    <p class="muted">GATT metadata describes what the device exposes. Advertised write properties only determine which manually selected Web Bluetooth write modes are available; they do not establish which mode Android uses.</p>
   </main>
 
   <script>
@@ -144,6 +153,8 @@
     const sendViButton = document.querySelector("#send-vi-button");
     const sendGvButton = document.querySelector("#send-gv-button");
     const sendGiButton = document.querySelector("#send-gi-button");
+    const writeModeSelect = document.querySelector("#write-mode-select");
+    const writeModeStatus = document.querySelector("#write-mode-status");
     const viStatus = document.querySelector("#vi-status");
     const sequenceStatus = document.querySelector("#sequence-status");
     const viLog = document.querySelector("#vi-log");
@@ -188,8 +199,9 @@
       startCaptureButton.disabled = !connected || !canNotify || captureActive || captureStarting || captureStopping;
       stopCaptureButton.disabled = !connected || !captureActive || captureStopping || commandSending;
       const canWrite = Boolean(ffe1Characteristic?.properties.write || ffe1Characteristic?.properties.writeWithoutResponse);
-      const androidWriteMode = ffe1Characteristic ? getAndroidCompatibleWriteMode(ffe1Characteristic) : null;
-      const canSend = connected && ffe1Characteristic?.uuid?.toLowerCase() === FFE1_CHARACTERISTIC && canWrite && Boolean(androidWriteMode) && captureActive && !captureStarting && !captureStopping && !commandSending;
+      writeModeSelect.disabled = !connected || !ffe1Characteristic || !canWrite || commandSending;
+      const selectedWriteMode = ffe1Characteristic ? getSelectedWriteMode(ffe1Characteristic) : null;
+      const canSend = connected && ffe1Characteristic?.uuid?.toLowerCase() === FFE1_CHARACTERISTIC && canWrite && Boolean(selectedWriteMode) && captureActive && !captureStarting && !captureStopping && !commandSending;
       sendViButton.disabled = !canSend || identificationSequence.VI.attempted;
       sendGvButton.disabled = !canSend || !identificationSequence.VI.responseAccepted || identificationSequence.GV.attempted;
       sendGiButton.disabled = !canSend || !identificationSequence.GV.responseAccepted || identificationSequence.GI.attempted;
@@ -542,10 +554,11 @@
       return chunks;
     }
 
-    function getAndroidCompatibleWriteMode(characteristic) {
-      // BluetoothLeService calls writeCharacteristic() without setting or inspecting write type.
-      // Do not guess Android's effective mode from the advertised properties.
-      void characteristic;
+    function getSelectedWriteMode(characteristic) {
+      // This is the user's explicit browser-test selection, not a claim about Android's mode.
+      const selected = writeModeSelect.value;
+      if (selected === "without response" && characteristic.properties.writeWithoutResponse) return selected;
+      if (selected === "with response" && characteristic.properties.write) return selected;
       return null;
     }
 
@@ -686,9 +699,9 @@
       if (commandName === "GV" && !identificationSequence.VI.responseAccepted) return;
       if (commandName === "GI" && !identificationSequence.GV.responseAccepted) return;
 
-      const mode = getAndroidCompatibleWriteMode(ffe1Characteristic);
+      const mode = getSelectedWriteMode(ffe1Characteristic);
       if (!mode) {
-        setMessage(viStatus, "Protocol write blocked: the decompiled Android service does not explicitly set its GATT write type, so an Android-compatible Web Bluetooth write mode cannot be verified from source.", true);
+        setMessage(viStatus, "Choose a Web Bluetooth write mode that FFE1 advertises before sending. Android's effective mode is still unverified.", true);
         updateCaptureControls();
         return;
       }
@@ -819,6 +832,8 @@
         selectedDevice = device;
         selectedDevice.addEventListener("gattserverdisconnected", handleDisconnect);
         ffe1Characteristic = null;
+        writeModeSelect.value = "";
+        setMessage(writeModeStatus, "Device changed. Connect, discover FFE1, then choose a supported Web Bluetooth write mode.");
         discardPendingReceiveBytes("new device selected");
         resetIdentificationSequence("New device selected. Sequence state reset; connect and start notifications before VI.");
         const name = device.name || "(advertised name unavailable)";
@@ -857,6 +872,8 @@
       chooseButton.disabled = true;
       setMessage(connectionStatus, "Connectingâ€¦");
       try {
+        writeModeSelect.value = "";
+        setMessage(writeModeStatus, "Choose a supported Web Bluetooth write mode for this connection. Android's effective mode remains unverified.");
         resetIdentificationSequence("New connection. Sequence state reset; VI is ready only after notifications start.");
         const server = await selectedDevice.gatt.connect();
         disconnectButton.disabled = false;
@@ -910,6 +927,14 @@
     sendViButton.addEventListener("click", () => sendIdentificationCommand("VI"));
     sendGvButton.addEventListener("click", () => sendIdentificationCommand("GV"));
     sendGiButton.addEventListener("click", () => sendIdentificationCommand("GI"));
+    writeModeSelect.addEventListener("change", () => {
+      updateCaptureControls();
+      const mode = ffe1Characteristic ? getSelectedWriteMode(ffe1Characteristic) : null;
+      setMessage(writeModeStatus, mode
+        ? `Selected ${mode}; this is an explicit browser test choice, not a verified Android write mode.`
+        : "Choose one of the write modes FFE1 advertises. Android's effective mode remains unverified.");
+      if (mode) setMessage(viStatus, `Selected ${mode}. Start notifications before sending VI; this mode has not been verified against Android.`);
+    });
 
     stopCaptureButton.addEventListener("click", async () => {
       if (!captureActive || !ffe1Characteristic || !selectedDevice?.gatt?.connected) return;
